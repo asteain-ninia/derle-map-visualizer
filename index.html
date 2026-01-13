@@ -172,7 +172,7 @@
       <label for="minArea">多角形の最小面積</label>
       <input id="minArea" type="number" min="0" step="10" value="50" />
       <label class="inline"><input id="includeCoast" type="checkbox" checked />陸地階層の海岸線を含める</label>
-      <label class="inline"><input id="splitIntersections" type="checkbox" />線の交差で分割（遅い）</label>
+      <label class="inline"><input id="splitIntersections" type="checkbox" checked />線の交差で分割（推奨・遅い）</label>
     </div>
 
     <div class="group">
@@ -638,27 +638,54 @@
           });
         }
 
-        const pointMap = new Map();
+        const pointGrid = new Map();
         const points = [];
         const pointHits = [];
         const edges = [];
         const edgeMap = new Map();
+        const cellSize = snap;
+
+        function gridKey(x, y) {
+          return `${x}:${y}`;
+        }
 
         function addPoint(pt) {
-          const key = `${Math.round(pt.x / snap)}:${Math.round(pt.y / snap)}`;
-          let idx = pointMap.get(key);
-          if (idx === undefined) {
-            idx = points.length;
+          const cx = Math.floor(pt.x / cellSize);
+          const cy = Math.floor(pt.y / cellSize);
+          let bestIdx = null;
+          let bestDist = Infinity;
+
+          for (let dx = -1; dx <= 1; dx += 1) {
+            for (let dy = -1; dy <= 1; dy += 1) {
+              const key = gridKey(cx + dx, cy + dy);
+              const candidates = pointGrid.get(key);
+              if (!candidates) continue;
+              for (let i = 0; i < candidates.length; i += 1) {
+                const idx = candidates[i];
+                const d = distance(pt, points[idx]);
+                if (d <= snap && d < bestDist) {
+                  bestDist = d;
+                  bestIdx = idx;
+                }
+              }
+            }
+          }
+
+          if (bestIdx === null) {
+            const idx = points.length;
             points.push({ x: pt.x, y: pt.y });
             pointHits.push(1);
-            pointMap.set(key, idx);
-          } else {
-            const hits = pointHits[idx] + 1;
-            points[idx].x = (points[idx].x * pointHits[idx] + pt.x) / hits;
-            points[idx].y = (points[idx].y * pointHits[idx] + pt.y) / hits;
-            pointHits[idx] = hits;
+            const key = gridKey(cx, cy);
+            if (!pointGrid.has(key)) pointGrid.set(key, []);
+            pointGrid.get(key).push(idx);
+            return idx;
           }
-          return idx;
+
+          const hits = pointHits[bestIdx] + 1;
+          points[bestIdx].x = (points[bestIdx].x * pointHits[bestIdx] + pt.x) / hits;
+          points[bestIdx].y = (points[bestIdx].y * pointHits[bestIdx] + pt.y) / hits;
+          pointHits[bestIdx] = hits;
+          return bestIdx;
         }
 
         updateProgress("点と辺を構築中", 0, segments.length, `線分: ${segments.length}`);
