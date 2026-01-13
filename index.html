@@ -214,6 +214,7 @@
       graph: null,
       polygons: [],
     };
+    let buildGraphInProgress = false;
 
     const layerDefs = [
       { id: "_海", label: "海" },
@@ -247,6 +248,21 @@
 
     function setStatus(message) {
       el.statusBox.textContent = message;
+    }
+
+    function formatProgress(done, total) {
+      if (!Number.isFinite(total) || total <= 0) return "";
+      const pct = Math.round((done / total) * 100);
+      return `${done}/${total} (${pct}%)`;
+    }
+
+    function setBuildStatus(lines) {
+      const body = lines.filter(Boolean);
+      setStatus(["グラフを構築中...", ...body].join("\n"));
+    }
+
+    function nextFrame() {
+      return new Promise((resolve) => requestAnimationFrame(() => resolve()));
     }
 
     function readFile(file) {
@@ -380,10 +396,13 @@
       return { x: out.x, y: out.y };
     }
 
-    function extractSegmentsFromLayer(layerEl, step, sourceTag) {
+    async function extractSegmentsFromLayer(layerEl, step, sourceTag, onProgress) {
       const segments = [];
-      const elements = layerEl.querySelectorAll("path, polyline, polygon, line");
-      elements.forEach((item) => {
+      const elements = Array.from(layerEl.querySelectorAll("path, polyline, polygon, line"));
+      const total = elements.length;
+      const yieldEvery = 20;
+      for (let index = 0; index < total; index += 1) {
+        const item = elements[index];
         let points = [];
         if (item.tagName.toLowerCase() === "path") {
           points = samplePathElement(item, step);
@@ -404,7 +423,12 @@
             source: sourceTag,
           });
         }
-      });
+
+        if (onProgress && (index % yieldEvery === 0 || index === total - 1)) {
+          onProgress(index + 1, total);
+          await nextFrame();
+        }
+      }
       return segments;
     }
 
@@ -425,7 +449,7 @@
       return Math.hypot(dx, dy);
     }
 
-    function splitSegmentsAtIntersections(segments, gridSize) {
+    async function splitSegmentsAtIntersections(segments, gridSize, onProgress) {
       const segIntersections = new Map();
       const grid = new Map();
 
@@ -451,13 +475,20 @@
         }
       }
 
+      const gridYield = 800;
       for (let i = 0; i < segments.length; i += 1) {
         addToGrid(i, segments[i]);
+        if (onProgress && (i % gridYield === 0 || i === segments.length - 1)) {
+          onProgress("グリッド構築中", i + 1, segments.length);
+          await nextFrame();
+        }
       }
 
       const checked = new Set();
-
-      for (const bucket of grid.values()) {
+      const buckets = Array.from(grid.values());
+      const bucketYield = 40;
+      for (let bucketIndex = 0; bucketIndex < buckets.length; bucketIndex += 1) {
+        const bucket = buckets[bucketIndex];
         for (let i = 0; i < bucket.length; i += 1) {
           for (let j = i + 1; j < bucket.length; j += 1) {
             const a = bucket[i];
@@ -475,10 +506,16 @@
             segIntersections.get(b).push(hit.t2);
           }
         }
+        if (onProgress && (bucketIndex % bucketYield === 0 || bucketIndex === buckets.length - 1)) {
+          onProgress("交差判定中", bucketIndex + 1, buckets.length);
+          await nextFrame();
+        }
       }
 
       const output = [];
-      segments.forEach((seg, idx) => {
+      const splitYield = 1000;
+      for (let idx = 0; idx < segments.length; idx += 1) {
+        const seg = segments[idx];
         const splits = segIntersections.get(idx) || [];
         const sorted = [0, 1, ...splits.filter((t) => t > 1e-6 && t < 1 - 1e-6)].sort((a, b) => a - b);
         for (let i = 0; i < sorted.length - 1; i += 1) {
@@ -490,7 +527,11 @@
             output.push({ a: p0, b: p1, source: seg.source });
           }
         }
-      });
+        if (onProgress && (idx % splitYield === 0 || idx === segments.length - 1)) {
+          onProgress("分割反映中", idx + 1, segments.length);
+          await nextFrame();
+        }
+      }
 
       return output;
     }
@@ -519,7 +560,11 @@
       return { t1, t2 };
     }
 
-    function buildGraph() {
+    async function buildGraph() {
+      if (buildGraphInProgress) {
+        setStatus("グラフ構築中です。完了を待ってください。");
+        return;
+      }
       if (!state.svgDoc) {
         setStatus("先にSVGファイルを読み込んでください。");
         return;
@@ -535,71 +580,117 @@
         return;
       }
 
-      let segments = extractSegmentsFromLayer(borderLayer, step, "border");
+      buildGraphInProgress = true;
+      el.buildGraphBtn.disabled = true;
+      el.extractBtn.disabled = true;
+      el.exportBtn.disabled = true;
 
-      if (includeCoast) {
-        const landLayers = ["_第一分高面", "_第二分高面", "_第三分高面", "_第四分高面", "_第五分高面"]
-          .map((id) => getLayer(id))
-          .filter(Boolean);
-        landLayers.forEach((layer) => {
-          segments = segments.concat(extractSegmentsFromLayer(layer, step, "coast"));
+      const updateProgress = (phase, done, total, extra) => {
+        const progress = formatProgress(done, total);
+        setBuildStatus([phase, progress, extra]);
+      };
+
+      try {
+        state.graph = null;
+        state.polygons = [];
+        clearOverlays();
+        setBuildStatus(["準備中..."]);
+        await nextFrame();
+
+        let segments = [];
+
+        updateProgress("国境界を抽出中", 0, 0);
+        const borderSegments = await extractSegmentsFromLayer(borderLayer, step, "border", (done, total) => {
+          updateProgress("国境界を抽出中", done, total);
         });
-      }
+        segments = segments.concat(borderSegments);
 
-      if (split) {
-        const gridSize = Math.max(step * 2, snap * 4, 1);
-        segments = splitSegmentsAtIntersections(segments, gridSize);
-      }
-
-      const pointMap = new Map();
-      const points = [];
-      const pointHits = [];
-      const edges = [];
-      const edgeMap = new Map();
-
-      function addPoint(pt) {
-        const key = `${Math.round(pt.x / snap)}:${Math.round(pt.y / snap)}`;
-        let idx = pointMap.get(key);
-        if (idx === undefined) {
-          idx = points.length;
-          points.push({ x: pt.x, y: pt.y });
-          pointHits.push(1);
-          pointMap.set(key, idx);
-        } else {
-          const hits = pointHits[idx] + 1;
-          points[idx].x = (points[idx].x * pointHits[idx] + pt.x) / hits;
-          points[idx].y = (points[idx].y * pointHits[idx] + pt.y) / hits;
-          pointHits[idx] = hits;
+        if (includeCoast) {
+          const landLayerIds = ["_第一分高面", "_第二分高面", "_第三分高面", "_第四分高面", "_第五分高面"];
+          const landLayers = landLayerIds.map((id) => getLayer(id)).filter(Boolean);
+          for (let i = 0; i < landLayers.length; i += 1) {
+            const layer = landLayers[i];
+            const label = `海岸線 ${i + 1}/${landLayers.length} を抽出中`;
+            const layerSegments = await extractSegmentsFromLayer(layer, step, "coast", (done, total) => {
+              updateProgress(label, done, total);
+            });
+            segments = segments.concat(layerSegments);
+            await nextFrame();
+          }
         }
-        return idx;
-      }
 
-      segments.forEach((seg) => {
-        const a = addPoint(seg.a);
-        const b = addPoint(seg.b);
-        if (a === b) return;
-        const key = a < b ? `${a}-${b}` : `${b}-${a}`;
-        let edge = edgeMap.get(key);
-        if (!edge) {
-          edge = { a, b, sources: new Set() };
-          edgeMap.set(key, edge);
-          edges.push(edge);
+        if (split) {
+          const gridSize = Math.max(step * 2, snap * 4, 1);
+          segments = await splitSegmentsAtIntersections(segments, gridSize, (phase, done, total) => {
+            updateProgress(`交差分割: ${phase}`, done, total);
+          });
         }
-        edge.sources.add(seg.source);
-      });
 
-      state.graph = { points, edges };
-      state.polygons = [];
-      clearOverlays();
-      drawEdges();
+        const pointMap = new Map();
+        const points = [];
+        const pointHits = [];
+        const edges = [];
+        const edgeMap = new Map();
 
-      setStatus([
-        `グラフを構築しました。`,
-        `点: ${points.length}`,
-        `辺: ${edges.length}`,
-        `線分: ${segments.length}`,
-        includeCoast ? "海岸線を含めました。" : "海岸線を除外しました。",
-      ].join("\n"));
+        function addPoint(pt) {
+          const key = `${Math.round(pt.x / snap)}:${Math.round(pt.y / snap)}`;
+          let idx = pointMap.get(key);
+          if (idx === undefined) {
+            idx = points.length;
+            points.push({ x: pt.x, y: pt.y });
+            pointHits.push(1);
+            pointMap.set(key, idx);
+          } else {
+            const hits = pointHits[idx] + 1;
+            points[idx].x = (points[idx].x * pointHits[idx] + pt.x) / hits;
+            points[idx].y = (points[idx].y * pointHits[idx] + pt.y) / hits;
+            pointHits[idx] = hits;
+          }
+          return idx;
+        }
+
+        updateProgress("点と辺を構築中", 0, segments.length, `線分: ${segments.length}`);
+        const buildYield = 2000;
+        for (let i = 0; i < segments.length; i += 1) {
+          const seg = segments[i];
+          const a = addPoint(seg.a);
+          const b = addPoint(seg.b);
+          if (a === b) continue;
+          const key = a < b ? `${a}-${b}` : `${b}-${a}`;
+          let edge = edgeMap.get(key);
+          if (!edge) {
+            edge = { a, b, sources: new Set() };
+            edgeMap.set(key, edge);
+            edges.push(edge);
+          }
+          edge.sources.add(seg.source);
+
+          if (i % buildYield === 0 || i === segments.length - 1) {
+            updateProgress("点と辺を構築中", i + 1, segments.length, `線分: ${segments.length}`);
+            await nextFrame();
+          }
+        }
+
+        state.graph = { points, edges };
+        state.polygons = [];
+        clearOverlays();
+        drawEdges();
+
+        setStatus([
+          `グラフを構築しました。`,
+          `点: ${points.length}`,
+          `辺: ${edges.length}`,
+          `線分: ${segments.length}`,
+          includeCoast ? "海岸線を含めました。" : "海岸線を除外しました。",
+        ].join("\n"));
+      } catch (error) {
+        setStatus(`グラフ構築に失敗しました: ${error.message}`);
+      } finally {
+        buildGraphInProgress = false;
+        el.buildGraphBtn.disabled = false;
+        el.extractBtn.disabled = false;
+        el.exportBtn.disabled = false;
+      }
     }
 
     function extractPolygons() {
