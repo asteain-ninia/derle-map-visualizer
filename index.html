@@ -136,6 +136,14 @@
       font-size: 12px;
       margin: 0;
     }
+    .layer-actions {
+      display: grid;
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .layer-actions button {
+      margin-top: 0;
+    }
     .inline {
       display: flex;
       gap: 8px;
@@ -161,6 +169,10 @@
     <div class="group">
       <h2>階層</h2>
       <div class="legend" id="layerToggles"></div>
+      <div class="layer-actions">
+        <button id="toggleLandBtn" class="secondary" disabled>分高面をまとめて切り替え</button>
+        <button id="toggleOtherBtn" class="secondary" disabled>その他レイヤーをまとめて切り替え</button>
+      </div>
     </div>
 
     <div class="group">
@@ -213,6 +225,8 @@
       viewBox: null,
       graph: null,
       polygons: [],
+      layerCheckboxes: new Map(),
+      otherLayerElements: [],
     };
     let buildGraphInProgress = false;
 
@@ -225,6 +239,7 @@
       { id: "_第五分高面", label: "第五分高面" },
       { id: "_国境界", label: "国境界" },
     ];
+    const landLayerIds = ["_第一分高面", "_第二分高面", "_第三分高面", "_第四分高面", "_第五分高面"];
 
     const el = {
       fileInput: document.getElementById("fileInput"),
@@ -238,6 +253,8 @@
       extractBtn: document.getElementById("extractBtn"),
       exportBtn: document.getElementById("exportBtn"),
       clearBtn: document.getElementById("clearBtn"),
+      toggleLandBtn: document.getElementById("toggleLandBtn"),
+      toggleOtherBtn: document.getElementById("toggleOtherBtn"),
       showEdges: document.getElementById("showEdges"),
       showPolys: document.getElementById("showPolys"),
       showPoints: document.getElementById("showPoints"),
@@ -310,11 +327,13 @@
       state.overlaySvg = overlaySvg;
 
       buildLayerToggles();
+      refreshLayerGroupControls();
       setStatus("SVGを読み込みました。階層を選んでグラフを構築してください。");
     }
 
     function buildLayerToggles() {
       el.layerToggles.innerHTML = "";
+      state.layerCheckboxes.clear();
       layerDefs.forEach((layer) => {
         const wrapper = document.createElement("label");
         const checkbox = document.createElement("input");
@@ -325,15 +344,96 @@
         wrapper.appendChild(checkbox);
         wrapper.appendChild(document.createTextNode(layer.label));
         el.layerToggles.appendChild(wrapper);
+        state.layerCheckboxes.set(layer.id, checkbox);
       });
     }
 
     function toggleLayer(layerId, visible) {
+      setLayerVisibility(layerId, visible);
+    }
+
+    function setLayerVisibility(layerId, visible) {
       if (!state.baseSvg) return;
       const target = state.baseSvg.getElementById(layerId);
       if (target) {
         target.style.display = visible ? "inline" : "none";
       }
+      const checkbox = state.layerCheckboxes.get(layerId);
+      if (checkbox) {
+        checkbox.checked = visible;
+      }
+    }
+
+    function toggleLayerGroup(layerIds) {
+      if (!state.baseSvg) {
+        setStatus("先にSVGファイルを読み込んでください。");
+        return;
+      }
+      const existing = layerIds
+        .map((id) => ({ id, el: state.baseSvg.getElementById(id) }))
+        .filter((entry) => entry.el);
+      if (!existing.length) {
+        setStatus("対象のレイヤーが見つかりません。");
+        return;
+      }
+      const allVisible = existing.every((entry) => entry.el.style.display !== "none");
+      const nextVisible = !allVisible;
+      existing.forEach((entry) => setLayerVisibility(entry.id, nextVisible));
+    }
+
+    function collectOtherLayerElements() {
+      if (!state.baseSvg) return [];
+      const definedIds = new Set(layerDefs.map((layer) => layer.id));
+      const definedElements = layerDefs
+        .map((layer) => state.baseSvg.getElementById(layer.id))
+        .filter(Boolean);
+      const candidates = Array.from(state.baseSvg.querySelectorAll("g[id]"))
+        .filter((el) => !definedIds.has(el.id))
+        .filter((el) => !el.closest("defs"));
+      const filtered = candidates.filter((el) => {
+        if (definedElements.some((def) => el.contains(def))) return false;
+        if (definedElements.some((def) => def.contains(el))) return false;
+        return true;
+      });
+      const filteredSet = new Set(filtered);
+      return filtered.filter((el) => {
+        let parent = el.parentElement;
+        while (parent && parent !== state.baseSvg) {
+          if (filteredSet.has(parent)) return false;
+          parent = parent.parentElement;
+        }
+        return true;
+      });
+    }
+
+    function refreshLayerGroupControls() {
+      if (!state.baseSvg) {
+        el.toggleLandBtn.disabled = true;
+        el.toggleOtherBtn.disabled = true;
+        state.otherLayerElements = [];
+        return;
+      }
+      const hasLandLayers = landLayerIds.some((id) => state.baseSvg.getElementById(id));
+      el.toggleLandBtn.disabled = !hasLandLayers;
+      state.otherLayerElements = collectOtherLayerElements();
+      el.toggleOtherBtn.disabled = state.otherLayerElements.length === 0;
+    }
+
+    function toggleOtherLayers() {
+      if (!state.baseSvg) {
+        setStatus("先にSVGファイルを読み込んでください。");
+        return;
+      }
+      const targets = state.otherLayerElements || [];
+      if (!targets.length) {
+        setStatus("その他レイヤーが見つかりません。");
+        return;
+      }
+      const allVisible = targets.every((el) => el.style.display !== "none");
+      const nextVisible = !allVisible;
+      targets.forEach((el) => {
+        el.style.display = nextVisible ? "inline" : "none";
+      });
     }
 
     function getLayer(layerId) {
@@ -632,7 +732,6 @@
 
         let coastLayerId = null;
         if (includeCoast) {
-          const landLayerIds = ["_第一分高面", "_第二分高面", "_第三分高面", "_第四分高面", "_第五分高面"];
           let coastLayer = null;
           for (let i = 0; i < landLayerIds.length; i += 1) {
             const id = landLayerIds[i];
@@ -1034,6 +1133,8 @@
       clearOverlays();
       setStatus("重ね表示を消去しました。");
     });
+    el.toggleLandBtn.addEventListener("click", () => toggleLayerGroup(landLayerIds));
+    el.toggleOtherBtn.addEventListener("click", toggleOtherLayers);
 
     [el.showEdges, el.showPolys, el.showPoints].forEach((checkbox) => {
       checkbox.addEventListener("change", () => {
