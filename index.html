@@ -605,17 +605,29 @@
         });
         segments = segments.concat(borderSegments);
 
+        let coastLayerId = null;
         if (includeCoast) {
           const landLayerIds = ["_第一分高面", "_第二分高面", "_第三分高面", "_第四分高面", "_第五分高面"];
-          const landLayers = landLayerIds.map((id) => getLayer(id)).filter(Boolean);
-          for (let i = 0; i < landLayers.length; i += 1) {
-            const layer = landLayers[i];
-            const label = `海岸線 ${i + 1}/${landLayers.length} を抽出中`;
-            const layerSegments = await extractSegmentsFromLayer(layer, step, "coast", (done, total) => {
+          let coastLayer = null;
+          for (let i = 0; i < landLayerIds.length; i += 1) {
+            const id = landLayerIds[i];
+            const layer = getLayer(id);
+            if (layer) {
+              coastLayer = layer;
+              coastLayerId = id;
+              break;
+            }
+          }
+
+          if (coastLayer) {
+            const label = `海岸線(${coastLayerId})を抽出中`;
+            const layerSegments = await extractSegmentsFromLayer(coastLayer, step, "coast", (done, total) => {
               updateProgress(label, done, total);
             });
             segments = segments.concat(layerSegments);
             await nextFrame();
+          } else {
+            updateProgress("海岸線レイヤーが見つかりません", 0, 0);
           }
         }
 
@@ -681,7 +693,11 @@
           `点: ${points.length}`,
           `辺: ${edges.length}`,
           `線分: ${segments.length}`,
-          includeCoast ? "海岸線を含めました。" : "海岸線を除外しました。",
+          includeCoast
+            ? coastLayerId
+              ? `海岸線(${coastLayerId})を含めました。`
+              : "海岸線レイヤーが見つからず除外しました。"
+            : "海岸線を除外しました。",
         ].join("\n"));
       } catch (error) {
         setStatus(`グラフ構築に失敗しました: ${error.message}`);
