@@ -788,6 +788,33 @@
 
       outgoing.forEach((list) => list.sort((i, j) => directed[i].angle - directed[j].angle));
 
+      const adjacency = Array.from({ length: points.length }, () => []);
+      edges.forEach((edge) => {
+        adjacency[edge.a].push(edge.b);
+        adjacency[edge.b].push(edge.a);
+      });
+
+      const components = new Array(points.length).fill(-1);
+      let componentId = 0;
+      for (let i = 0; i < points.length; i += 1) {
+        if (components[i] !== -1) continue;
+        if (adjacency[i].length === 0) continue;
+        const stack = [i];
+        components[i] = componentId;
+        while (stack.length) {
+          const v = stack.pop();
+          const neighbors = adjacency[v];
+          for (let j = 0; j < neighbors.length; j += 1) {
+            const next = neighbors[j];
+            if (components[next] === -1) {
+              components[next] = componentId;
+              stack.push(next);
+            }
+          }
+        }
+        componentId += 1;
+      }
+
       function nextEdgeIndex(dirIndex) {
         const dir = directed[dirIndex];
         const v = dir.to;
@@ -828,7 +855,7 @@
         if (face.length < 3) continue;
         const area = polygonArea(face, points);
         if (Math.abs(area) < minArea) continue;
-        faces.push({ points: face, area });
+        faces.push({ points: face, area, component: components[face[0]] });
       }
 
       if (faces.length === 0) {
@@ -836,8 +863,18 @@
         return;
       }
 
-      const largest = faces.reduce((max, face) => (Math.abs(face.area) > Math.abs(max.area) ? face : max), faces[0]);
-      const polygons = faces.filter((face) => face !== largest);
+      const outerFaces = new Set();
+      const faceGroups = new Map();
+      faces.forEach((face) => {
+        const key = face.component;
+        if (!faceGroups.has(key)) faceGroups.set(key, []);
+        faceGroups.get(key).push(face);
+      });
+      faceGroups.forEach((group) => {
+        const largest = group.reduce((max, face) => (Math.abs(face.area) > Math.abs(max.area) ? face : max), group[0]);
+        outerFaces.add(largest);
+      });
+      const polygons = faces.filter((face) => !outerFaces.has(face));
 
       state.polygons = polygons.map((face, idx) => {
         return {
@@ -854,7 +891,9 @@
 
       setStatus([
         `多角形を抽出しました: ${state.polygons.length}`,
-        `外側の面を除外しました: 面積 ${largest.area.toFixed(2)}`,
+        outerFaces.size === 1
+          ? `外側の面を除外しました: 面積 ${Array.from(outerFaces)[0].area.toFixed(2)}`
+          : `外側の面を除外しました: ${outerFaces.size}面`,
         `最小面積: ${minArea}`,
       ].join("\n"));
     }
