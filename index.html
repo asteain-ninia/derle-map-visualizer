@@ -1,9 +1,9 @@
 ﻿<!doctype html>
-<html lang="en">
+<html lang="ja">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>SVG Map Border Tool</title>
+  <title>SVG地図境界作成</title>
   <style>
     :root {
       --bg: #0f1116;
@@ -149,50 +149,50 @@
 </head>
 <body>
   <aside>
-    <h1>SVG Map Border Tool</h1>
+    <h1>SVG地図境界作成</h1>
 
     <div class="group">
-      <h2>Input</h2>
-      <label for="fileInput">SVG file</label>
+      <h2>入力</h2>
+      <label for="fileInput">SVGファイル</label>
       <input id="fileInput" type="file" accept="image/svg+xml" />
-      <div class="note">Load the Illustrator-exported SVG map to begin.</div>
+      <div class="note">Illustrator書き出しのSVG地図を読み込んで開始します。</div>
     </div>
 
     <div class="group">
-      <h2>Layers</h2>
+      <h2>階層</h2>
       <div class="legend" id="layerToggles"></div>
     </div>
 
     <div class="group">
-      <h2>Sampling</h2>
-      <label for="sampleStep">Sample step (map units)</label>
+      <h2>間引き</h2>
+      <label for="sampleStep">間引き間隔（地図単位）</label>
       <input id="sampleStep" type="number" min="0.2" step="0.2" value="1.2" />
-      <label for="snapTolerance">Snap tolerance (map units)</label>
+      <label for="snapTolerance">吸着許容値（地図単位）</label>
       <input id="snapTolerance" type="number" min="0.05" step="0.05" value="0.25" />
-      <label for="minArea">Min polygon area</label>
+      <label for="minArea">多角形の最小面積</label>
       <input id="minArea" type="number" min="0" step="10" value="50" />
-      <label class="inline"><input id="includeCoast" type="checkbox" checked />Include coastline from land layers</label>
-      <label class="inline"><input id="splitIntersections" type="checkbox" />Split at line crossings (slow)</label>
+      <label class="inline"><input id="includeCoast" type="checkbox" checked />陸地階層の海岸線を含める</label>
+      <label class="inline"><input id="splitIntersections" type="checkbox" />線の交差で分割（遅い）</label>
     </div>
 
     <div class="group">
-      <h2>Actions</h2>
-      <button id="buildGraphBtn">Build graph</button>
-      <button id="extractBtn" class="secondary">Extract polygons</button>
-      <button id="exportBtn" class="secondary">Export JSON</button>
-      <button id="clearBtn" class="danger">Clear overlays</button>
+      <h2>操作</h2>
+      <button id="buildGraphBtn">グラフを構築</button>
+      <button id="extractBtn" class="secondary">多角形を抽出</button>
+      <button id="exportBtn" class="secondary">JSONを書き出し</button>
+      <button id="clearBtn" class="danger">重ね表示を消去</button>
     </div>
 
     <div class="group">
-      <h2>Display</h2>
-      <label class="inline"><input id="showEdges" type="checkbox" checked />Show edges</label>
-      <label class="inline"><input id="showPolys" type="checkbox" checked />Show polygons</label>
-      <label class="inline"><input id="showPoints" type="checkbox" />Show points</label>
+      <h2>表示</h2>
+      <label class="inline"><input id="showEdges" type="checkbox" checked />辺を表示</label>
+      <label class="inline"><input id="showPolys" type="checkbox" checked />多角形を表示</label>
+      <label class="inline"><input id="showPoints" type="checkbox" />点を表示</label>
     </div>
 
     <div class="group">
-      <h2>Status</h2>
-      <div class="status" id="statusBox">Waiting for SVG.</div>
+      <h2>状態</h2>
+      <div class="status" id="statusBox">SVGを待機中。</div>
     </div>
   </aside>
 
@@ -216,13 +216,13 @@
     };
 
     const layerDefs = [
-      { id: "_海", label: "Sea" },
-      { id: "_第一分高面", label: "Land 1" },
-      { id: "_第二分高面", label: "Land 2" },
-      { id: "_第三分高面", label: "Land 3" },
-      { id: "_第四分高面", label: "Land 4" },
-      { id: "_第五分高面", label: "Land 5" },
-      { id: "_国境界", label: "Borders" },
+      { id: "_海", label: "海" },
+      { id: "_第一分高面", label: "第一分高面" },
+      { id: "_第二分高面", label: "第二分高面" },
+      { id: "_第三分高面", label: "第三分高面" },
+      { id: "_第四分高面", label: "第四分高面" },
+      { id: "_第五分高面", label: "第五分高面" },
+      { id: "_国境界", label: "国境界" },
     ];
 
     const el = {
@@ -294,7 +294,7 @@
       state.overlaySvg = overlaySvg;
 
       buildLayerToggles();
-      setStatus("SVG loaded. Choose layers and build the graph.");
+      setStatus("SVGを読み込みました。階層を選んでグラフを構築してください。");
     }
 
     function buildLayerToggles() {
@@ -521,7 +521,7 @@
 
     function buildGraph() {
       if (!state.svgDoc) {
-        setStatus("Load an SVG file first.");
+        setStatus("先にSVGファイルを読み込んでください。");
         return;
       }
       const step = Number(el.sampleStep.value);
@@ -531,7 +531,7 @@
 
       const borderLayer = getLayer("_国境界");
       if (!borderLayer) {
-        setStatus("Border layer (_国境界) not found.");
+        setStatus("国境界の階層（_国境界）が見つかりません。");
         return;
       }
 
@@ -594,17 +594,17 @@
       drawEdges();
 
       setStatus([
-        `Graph built.`,
-        `Points: ${points.length}`,
-        `Edges: ${edges.length}`,
-        `Segments: ${segments.length}`,
-        includeCoast ? "Coastline included." : "Coastline excluded.",
+        `グラフを構築しました。`,
+        `点: ${points.length}`,
+        `辺: ${edges.length}`,
+        `線分: ${segments.length}`,
+        includeCoast ? "海岸線を含めました。" : "海岸線を除外しました。",
       ].join("\n"));
     }
 
     function extractPolygons() {
       if (!state.graph) {
-        setStatus("Build the graph first.");
+        setStatus("先にグラフを構築してください。");
         return;
       }
 
@@ -673,7 +673,7 @@
       }
 
       if (faces.length === 0) {
-        setStatus("No polygons found. Try adjusting sampling or enabling coastlines.");
+        setStatus("多角形が見つかりません。間引き設定を調整するか海岸線を有効にしてください。");
         return;
       }
 
@@ -694,9 +694,9 @@
       drawPoints();
 
       setStatus([
-        `Polygons extracted: ${state.polygons.length}`,
-        `Outer face removed: area ${largest.area.toFixed(2)}`,
-        `Min area: ${minArea}`,
+        `多角形を抽出しました: ${state.polygons.length}`,
+        `外側の面を除外しました: 面積 ${largest.area.toFixed(2)}`,
+        `最小面積: ${minArea}`,
       ].join("\n"));
     }
 
@@ -783,7 +783,7 @@
 
     function exportJson() {
       if (!state.graph || !state.polygons.length) {
-        setStatus("Build graph and extract polygons first.");
+        setStatus("先にグラフを構築して多角形を抽出してください。");
         return;
       }
 
@@ -815,7 +815,7 @@
       link.remove();
       URL.revokeObjectURL(url);
 
-      setStatus("Exported borders.json");
+      setStatus("borders.jsonを書き出しました。");
     }
 
     el.fileInput.addEventListener("change", async (event) => {
@@ -825,7 +825,7 @@
         const text = await readFile(file);
         loadSvgText(text);
       } catch (error) {
-        setStatus(`Failed to load SVG: ${error.message}`);
+        setStatus(`SVGの読み込みに失敗しました: ${error.message}`);
       }
     });
 
@@ -834,7 +834,7 @@
     el.exportBtn.addEventListener("click", exportJson);
     el.clearBtn.addEventListener("click", () => {
       clearOverlays();
-      setStatus("Overlays cleared.");
+      setStatus("重ね表示を消去しました。");
     });
 
     [el.showEdges, el.showPolys, el.showPoints].forEach((checkbox) => {
