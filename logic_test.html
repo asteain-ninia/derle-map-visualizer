@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Logic Test</title>
+  <style>
+    :root {
+      --bg: #0f1116;
+      --panel: #171a22;
+      --panel-border: #2a2f3a;
+      --text: #e6e9ef;
+      --muted: #9aa3b2;
+      --accent: #6abf69;
+      --danger: #e06c75;
+      --line: #7aa2f7;
+      --ghost: rgba(230, 233, 239, 0.3);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--panel-border);
+      background: rgba(255, 255, 255, 0.02);
+    }
+    header h1 {
+      margin: 0 0 4px;
+      font-size: 18px;
+    }
+    header p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .container {
+      padding: 16px 20px 24px;
+      display: grid;
+      gap: 16px;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 16px;
+      align-items: center;
+      font-size: 13px;
+    }
+    .controls label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .cases {
+      display: grid;
+      gap: 16px;
+    }
+    .case {
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      border-radius: 10px;
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+    .case-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .case-title {
+      font-size: 14px;
+      margin: 0;
+    }
+    .badge {
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+    }
+    .badge.pass {
+      background: rgba(106, 191, 105, 0.2);
+      color: var(--accent);
+      border: 1px solid rgba(106, 191, 105, 0.4);
+    }
+    .badge.fail {
+      background: rgba(224, 108, 117, 0.2);
+      color: var(--danger);
+      border: 1px solid rgba(224, 108, 117, 0.4);
+    }
+    .meta {
+      font-size: 11px;
+      color: var(--muted);
+    }
+    svg {
+      width: 100%;
+      height: 150px;
+      border-radius: 8px;
+      background: #0b0f15;
+      border: 1px solid var(--panel-border);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Logic Test</h1>
+    <p>Visual check for segment splitting with overlaps and intersections.</p>
+  </header>
+
+  <main class="container">
+    <section class="controls">
+      <label><input id="toggleOriginal" type="checkbox" checked />Show original segments</label>
+      <label><input id="toggleSplit" type="checkbox" checked />Show split segments</label>
+      <label><input id="toggleExpected" type="checkbox" checked />Show expected points</label>
+      <label><input id="toggleEndpoints" type="checkbox" />Show split endpoints</label>
+    </section>
+    <section id="cases" class="cases"></section>
+  </main>
+
+  <svg id="measure" width="0" height="0" style="position:absolute; left:-9999px; top:-9999px;"></svg>
+
+  <script src="logic.js"></script>
+  <script>
+    const cases = [
+      {
+        id: "cross",
+        label: "Crossing (X)",
+        segments: [
+          { a: { x: 10, y: 10 }, b: { x: 110, y: 110 }, source: "test" },
+          { a: { x: 10, y: 110 }, b: { x: 110, y: 10 }, source: "test" },
+        ],
+        expected: [{ x: 60, y: 60 }],
+      },
+      {
+        id: "tee",
+        label: "T junction",
+        segments: [
+          { a: { x: 10, y: 60 }, b: { x: 110, y: 60 }, source: "test" },
+          { a: { x: 60, y: 10 }, b: { x: 60, y: 60 }, source: "test" },
+        ],
+        expected: [{ x: 60, y: 60 }],
+      },
+      {
+        id: "overlap",
+        label: "Colinear overlap",
+        segments: [
+          { a: { x: 10, y: 40 }, b: { x: 110, y: 40 }, source: "test" },
+          { a: { x: 60, y: 40 }, b: { x: 140, y: 40 }, source: "test" },
+        ],
+        expected: [{ x: 60, y: 40 }, { x: 110, y: 40 }],
+      },
+      {
+        id: "touch",
+        label: "Colinear touch",
+        segments: [
+          { a: { x: 10, y: 90 }, b: { x: 60, y: 90 }, source: "test" },
+          { a: { x: 60, y: 90 }, b: { x: 110, y: 90 }, source: "test" },
+        ],
+        expected: [{ x: 60, y: 90 }],
+      },
+    ];
+
+    DerleLogic.setMeasureSvg(document.getElementById("measure"));
+
+    const toggleOriginal = document.getElementById("toggleOriginal");
+    const toggleSplit = document.getElementById("toggleSplit");
+    const toggleExpected = document.getElementById("toggleExpected");
+    const toggleEndpoints = document.getElementById("toggleEndpoints");
+    const casesHost = document.getElementById("cases");
+
+    function createSvg(width, height) {
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+      svg.setAttribute("width", width);
+      svg.setAttribute("height", height);
+      return svg;
+    }
+
+    function drawSegments(parent, segments, style) {
+      const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      group.setAttribute("stroke", style.stroke);
+      group.setAttribute("stroke-width", style.strokeWidth);
+      group.setAttribute("fill", "none");
+      if (style.dash) {
+        group.setAttribute("stroke-dasharray", style.dash);
+      }
+      segments.forEach((seg) => {
+        const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        line.setAttribute("x1", seg.a.x);
+        line.setAttribute("y1", seg.a.y);
+        line.setAttribute("x2", seg.b.x);
+        line.setAttribute("y2", seg.b.y);
+        group.appendChild(line);
+      });
+      parent.appendChild(group);
+      return group;
+    }
+
+    function drawPoints(parent, points, style) {
+      const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      group.setAttribute("fill", style.fill);
+      points.forEach((pt) => {
+        const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        circle.setAttribute("cx", pt.x);
+        circle.setAttribute("cy", pt.y);
+        circle.setAttribute("r", style.radius);
+        group.appendChild(circle);
+      });
+      parent.appendChild(group);
+      return group;
+    }
+
+    function collectEndpoints(segments) {
+      const points = [];
+      segments.forEach((seg) => {
+        points.push(seg.a, seg.b);
+      });
+      return points;
+    }
+
+    function hasPoint(points, target, tol) {
+      for (let i = 0; i < points.length; i += 1) {
+        const p = points[i];
+        if (Math.hypot(p.x - target.x, p.y - target.y) <= tol) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    async function renderCases() {
+      casesHost.innerHTML = "";
+      const gridSize = 20;
+      for (let i = 0; i < cases.length; i += 1) {
+        const testCase = cases[i];
+        const splitSegments = await DerleLogic.splitSegmentsAtIntersections(testCase.segments, gridSize);
+        const endpoints = collectEndpoints(splitSegments);
+        const expected = testCase.expected || [];
+        const pass = expected.every((pt) => hasPoint(endpoints, pt, 0.6));
+
+        const card = document.createElement("div");
+        card.className = "case";
+        const header = document.createElement("div");
+        header.className = "case-header";
+        const title = document.createElement("h2");
+        title.className = "case-title";
+        title.textContent = testCase.label;
+        const badge = document.createElement("span");
+        badge.className = `badge ${pass ? "pass" : "fail"}`;
+        badge.textContent = pass ? "PASS" : "FAIL";
+        header.appendChild(title);
+        header.appendChild(badge);
+        card.appendChild(header);
+
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent = `Segments: ${testCase.segments.length} -> ${splitSegments.length}, Expected points: ${expected.length}`;
+        card.appendChild(meta);
+
+        const svg = createSvg(160, 120);
+        const originalGroup = drawSegments(svg, testCase.segments, {
+          stroke: "var(--ghost)",
+          strokeWidth: "2",
+          dash: "4 4",
+        });
+        const splitGroup = drawSegments(svg, splitSegments, {
+          stroke: "var(--line)",
+          strokeWidth: "2.6",
+        });
+        const expectedGroup = drawPoints(svg, expected, { fill: "var(--danger)", radius: 3.2 });
+        const endpointsGroup = drawPoints(svg, endpoints, { fill: "var(--accent)", radius: 1.8 });
+
+        originalGroup.style.display = toggleOriginal.checked ? "inline" : "none";
+        splitGroup.style.display = toggleSplit.checked ? "inline" : "none";
+        expectedGroup.style.display = toggleExpected.checked ? "inline" : "none";
+        endpointsGroup.style.display = toggleEndpoints.checked ? "inline" : "none";
+
+        card.appendChild(svg);
+        casesHost.appendChild(card);
+      }
+    }
+
+    function syncToggles() {
+      const cards = casesHost.querySelectorAll("svg");
+      cards.forEach((svg) => {
+        const groups = svg.querySelectorAll("g");
+        if (groups.length < 4) return;
+        groups[0].style.display = toggleOriginal.checked ? "inline" : "none";
+        groups[1].style.display = toggleSplit.checked ? "inline" : "none";
+        groups[2].style.display = toggleExpected.checked ? "inline" : "none";
+        groups[3].style.display = toggleEndpoints.checked ? "inline" : "none";
+      });
+    }
+
+    [toggleOriginal, toggleSplit, toggleExpected, toggleEndpoints].forEach((input) => {
+      input.addEventListener("change", syncToggles);
+    });
+
+    renderCases();
+  </script>
+</body>
+</html>

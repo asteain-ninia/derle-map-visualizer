@@ -216,6 +216,7 @@
 
   <svg id="measure" width="0" height="0" style="position:absolute; left:-9999px; top:-9999px;"></svg>
 
+  <script src="logic.js"></script>
   <script>
     const state = {
       svgText: null,
@@ -263,6 +264,8 @@
       measureSvg: document.getElementById("measure"),
     };
 
+    DerleLogic.setMeasureSvg(el.measureSvg);
+
     function setStatus(message) {
       el.statusBox.textContent = message;
     }
@@ -276,10 +279,6 @@
     function setBuildStatus(lines) {
       const body = lines.filter(Boolean);
       setStatus(["グラフを構築中...", ...body].join("\n"));
-    }
-
-    function nextFrame() {
-      return new Promise((resolve) => requestAnimationFrame(() => resolve()));
     }
 
     function readFile(file) {
@@ -441,250 +440,6 @@
       return state.svgDoc.getElementById(layerId) || state.svgDoc.querySelector(`[data-name='${layerId}']`);
     }
 
-    function splitPathData(d) {
-      if (!d) return [];
-      const parts = d.trim().split(/(?=M)/).map((part) => part.trim()).filter(Boolean);
-      return parts;
-    }
-
-    function samplePathElement(pathEl, step, pathDataOverride) {
-      const clone = pathEl.cloneNode(true);
-      if (pathDataOverride) {
-        clone.setAttribute("d", pathDataOverride);
-      }
-      el.measureSvg.appendChild(clone);
-      const length = clone.getTotalLength();
-      const count = Math.max(2, Math.ceil(length / step));
-      const points = [];
-      for (let i = 0; i <= count; i += 1) {
-        const raw = clone.getPointAtLength((length * i) / count);
-        points.push(applyTransform(raw, clone));
-      }
-      el.measureSvg.removeChild(clone);
-      return points;
-    }
-
-    function samplePolylineElement(polyEl) {
-      const clone = polyEl.cloneNode(true);
-      el.measureSvg.appendChild(clone);
-      const points = [];
-      const raw = clone.getAttribute("points") || "";
-      const parts = raw.trim().split(/[\s,]+/).filter(Boolean);
-      for (let i = 0; i < parts.length; i += 2) {
-        const x = Number(parts[i]);
-        const y = Number(parts[i + 1]);
-        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-        points.push(applyTransform({ x, y }, clone));
-      }
-      el.measureSvg.removeChild(clone);
-      return points;
-    }
-
-    function sampleLineElement(lineEl) {
-      const clone = lineEl.cloneNode(true);
-      el.measureSvg.appendChild(clone);
-      const x1 = Number(clone.getAttribute("x1"));
-      const y1 = Number(clone.getAttribute("y1"));
-      const x2 = Number(clone.getAttribute("x2"));
-      const y2 = Number(clone.getAttribute("y2"));
-      const pts = [
-        applyTransform({ x: x1, y: y1 }, clone),
-        applyTransform({ x: x2, y: y2 }, clone),
-      ];
-      el.measureSvg.removeChild(clone);
-      return pts;
-    }
-
-    function applyTransform(point, element) {
-      const ctm = element.getCTM();
-      if (!ctm) return { x: point.x, y: point.y };
-      const svgPoint = el.measureSvg.createSVGPoint();
-      svgPoint.x = point.x;
-      svgPoint.y = point.y;
-      const out = svgPoint.matrixTransform(ctm);
-      return { x: out.x, y: out.y };
-    }
-
-    async function extractSegmentsFromLayer(layerEl, step, sourceTag, onProgress) {
-      const segments = [];
-      const elements = Array.from(layerEl.querySelectorAll("path, polyline, polygon, line"));
-      const total = elements.length;
-      const yieldEvery = 20;
-
-      const pushSegments = (points) => {
-        const cleaned = removeSequentialDuplicates(points, 1e-6);
-        for (let i = 0; i < cleaned.length - 1; i += 1) {
-          segments.push({
-            a: cleaned[i],
-            b: cleaned[i + 1],
-            source: sourceTag,
-          });
-        }
-      };
-
-      for (let index = 0; index < total; index += 1) {
-        const item = elements[index];
-        const tag = item.tagName.toLowerCase();
-        if (tag === "path") {
-          const d = item.getAttribute("d") || "";
-          const subpaths = splitPathData(d);
-          if (subpaths.length === 1) {
-            const points = samplePathElement(item, step, subpaths[0]);
-            pushSegments(points);
-          } else if (subpaths.length > 1) {
-            // Illustratorなどが複数サブパスを1つのpathに入れるため分割する。
-            subpaths.forEach((subpath) => {
-              const points = samplePathElement(item, step, subpath);
-              pushSegments(points);
-            });
-          }
-        } else if (tag === "polyline" || tag === "polygon") {
-          const points = samplePolylineElement(item);
-          if (tag === "polygon" && points.length > 2) {
-            points.push(points[0]);
-          }
-          pushSegments(points);
-        } else if (tag === "line") {
-          const points = sampleLineElement(item);
-          pushSegments(points);
-        }
-
-        if (onProgress && (index % yieldEvery === 0 || index === total - 1)) {
-          onProgress(index + 1, total);
-          await nextFrame();
-        }
-      }
-      return segments;
-    }
-
-    function removeSequentialDuplicates(points, eps) {
-      if (points.length === 0) return points;
-      const output = [points[0]];
-      for (let i = 1; i < points.length; i += 1) {
-        if (distance(points[i], output[output.length - 1]) > eps) {
-          output.push(points[i]);
-        }
-      }
-      return output;
-    }
-
-    function distance(a, b) {
-      const dx = a.x - b.x;
-      const dy = a.y - b.y;
-      return Math.hypot(dx, dy);
-    }
-
-    async function splitSegmentsAtIntersections(segments, gridSize, onProgress) {
-      const segIntersections = new Map();
-      const grid = new Map();
-
-      function gridKey(x, y) {
-        return `${x},${y}`;
-      }
-
-      function addToGrid(idx, seg) {
-        const minX = Math.min(seg.a.x, seg.b.x);
-        const maxX = Math.max(seg.a.x, seg.b.x);
-        const minY = Math.min(seg.a.y, seg.b.y);
-        const maxY = Math.max(seg.a.y, seg.b.y);
-        const x0 = Math.floor(minX / gridSize);
-        const x1 = Math.floor(maxX / gridSize);
-        const y0 = Math.floor(minY / gridSize);
-        const y1 = Math.floor(maxY / gridSize);
-        for (let gx = x0; gx <= x1; gx += 1) {
-          for (let gy = y0; gy <= y1; gy += 1) {
-            const key = gridKey(gx, gy);
-            if (!grid.has(key)) grid.set(key, []);
-            grid.get(key).push(idx);
-          }
-        }
-      }
-
-      const gridYield = 800;
-      for (let i = 0; i < segments.length; i += 1) {
-        addToGrid(i, segments[i]);
-        if (onProgress && (i % gridYield === 0 || i === segments.length - 1)) {
-          onProgress("グリッド構築中", i + 1, segments.length);
-          await nextFrame();
-        }
-      }
-
-      const checked = new Set();
-      const buckets = Array.from(grid.values());
-      const bucketYield = 40;
-      for (let bucketIndex = 0; bucketIndex < buckets.length; bucketIndex += 1) {
-        const bucket = buckets[bucketIndex];
-        for (let i = 0; i < bucket.length; i += 1) {
-          for (let j = i + 1; j < bucket.length; j += 1) {
-            const a = bucket[i];
-            const b = bucket[j];
-            const key = a < b ? `${a}-${b}` : `${b}-${a}`;
-            if (checked.has(key)) continue;
-            checked.add(key);
-            const segA = segments[a];
-            const segB = segments[b];
-            const hit = segmentIntersection(segA.a, segA.b, segB.a, segB.b);
-            if (!hit) continue;
-            if (!segIntersections.has(a)) segIntersections.set(a, []);
-            if (!segIntersections.has(b)) segIntersections.set(b, []);
-            segIntersections.get(a).push(hit.t1);
-            segIntersections.get(b).push(hit.t2);
-          }
-        }
-        if (onProgress && (bucketIndex % bucketYield === 0 || bucketIndex === buckets.length - 1)) {
-          onProgress("交差判定中", bucketIndex + 1, buckets.length);
-          await nextFrame();
-        }
-      }
-
-      const output = [];
-      const splitYield = 1000;
-      for (let idx = 0; idx < segments.length; idx += 1) {
-        const seg = segments[idx];
-        const splits = segIntersections.get(idx) || [];
-        const sorted = [0, 1, ...splits.filter((t) => t > 1e-6 && t < 1 - 1e-6)].sort((a, b) => a - b);
-        for (let i = 0; i < sorted.length - 1; i += 1) {
-          const t0 = sorted[i];
-          const t1 = sorted[i + 1];
-          const p0 = lerpPoint(seg.a, seg.b, t0);
-          const p1 = lerpPoint(seg.a, seg.b, t1);
-          if (distance(p0, p1) > 1e-6) {
-            output.push({ a: p0, b: p1, source: seg.source });
-          }
-        }
-        if (onProgress && (idx % splitYield === 0 || idx === segments.length - 1)) {
-          onProgress("分割反映中", idx + 1, segments.length);
-          await nextFrame();
-        }
-      }
-
-      return output;
-    }
-
-    function lerpPoint(a, b, t) {
-      return {
-        x: a.x + (b.x - a.x) * t,
-        y: a.y + (b.y - a.y) * t,
-      };
-    }
-
-    function segmentIntersection(p1, p2, p3, p4) {
-      const dx1 = p2.x - p1.x;
-      const dy1 = p2.y - p1.y;
-      const dx2 = p4.x - p3.x;
-      const dy2 = p4.y - p3.y;
-      const denom = dx1 * dy2 - dy1 * dx2;
-      if (Math.abs(denom) < 1e-9) return null;
-
-      const dx3 = p1.x - p3.x;
-      const dy3 = p1.y - p3.y;
-      const t1 = (dx2 * dy3 - dy2 * dx3) / denom;
-      const t2 = (dx1 * dy3 - dy1 * dx3) / denom;
-      if (t1 < 0 || t1 > 1 || t2 < 0 || t2 > 1) return null;
-
-      return { t1, t2 };
-    }
-
     async function buildGraph() {
       if (buildGraphInProgress) {
         setStatus("グラフ構築中です。完了を待ってください。");
@@ -714,18 +469,23 @@
         const progress = formatProgress(done, total);
         setBuildStatus([phase, progress, extra]);
       };
+      const splitPhaseLabel = {
+        grid: "グリッド構築中",
+        intersections: "交差判定中",
+        split: "分割反映中",
+      };
 
       try {
         state.graph = null;
         state.polygons = [];
         clearOverlays();
         setBuildStatus(["準備中..."]);
-        await nextFrame();
+        await DerleLogic.nextFrame();
 
         let segments = [];
 
         updateProgress("国境界を抽出中", 0, 0);
-        const borderSegments = await extractSegmentsFromLayer(borderLayer, step, "border", (done, total) => {
+        const borderSegments = await DerleLogic.extractSegmentsFromLayer(borderLayer, step, "border", (done, total) => {
           updateProgress("国境界を抽出中", done, total);
         });
         segments = segments.concat(borderSegments);
@@ -745,11 +505,11 @@
 
           if (coastLayer) {
             const label = `海岸線(${coastLayerId})を抽出中`;
-            const layerSegments = await extractSegmentsFromLayer(coastLayer, step, "coast", (done, total) => {
+            const layerSegments = await DerleLogic.extractSegmentsFromLayer(coastLayer, step, "coast", (done, total) => {
               updateProgress(label, done, total);
             });
             segments = segments.concat(layerSegments);
-            await nextFrame();
+            await DerleLogic.nextFrame();
           } else {
             updateProgress("海岸線レイヤーが見つかりません", 0, 0);
           }
@@ -757,92 +517,26 @@
 
         if (split) {
           const gridSize = Math.max(step * 2, snap * 4, 1);
-          segments = await splitSegmentsAtIntersections(segments, gridSize, (phase, done, total) => {
-            updateProgress(`交差分割: ${phase}`, done, total);
+          segments = await DerleLogic.splitSegmentsAtIntersections(segments, gridSize, (phase, done, total) => {
+            const label = splitPhaseLabel[phase] || phase;
+            updateProgress(`交差分割: ${label}`, done, total);
           });
         }
 
-        const pointGrid = new Map();
-        const points = [];
-        const pointHits = [];
-        const edges = [];
-        const edgeMap = new Map();
-        const cellSize = snap;
-
-        function gridKey(x, y) {
-          return `${x}:${y}`;
-        }
-
-        function addPoint(pt) {
-          const cx = Math.floor(pt.x / cellSize);
-          const cy = Math.floor(pt.y / cellSize);
-          let bestIdx = null;
-          let bestDist = Infinity;
-
-          for (let dx = -1; dx <= 1; dx += 1) {
-            for (let dy = -1; dy <= 1; dy += 1) {
-              const key = gridKey(cx + dx, cy + dy);
-              const candidates = pointGrid.get(key);
-              if (!candidates) continue;
-              for (let i = 0; i < candidates.length; i += 1) {
-                const idx = candidates[i];
-                const d = distance(pt, points[idx]);
-                if (d <= snap && d < bestDist) {
-                  bestDist = d;
-                  bestIdx = idx;
-                }
-              }
-            }
-          }
-
-          if (bestIdx === null) {
-            const idx = points.length;
-            points.push({ x: pt.x, y: pt.y });
-            pointHits.push(1);
-            const key = gridKey(cx, cy);
-            if (!pointGrid.has(key)) pointGrid.set(key, []);
-            pointGrid.get(key).push(idx);
-            return idx;
-          }
-
-          const hits = pointHits[bestIdx] + 1;
-          points[bestIdx].x = (points[bestIdx].x * pointHits[bestIdx] + pt.x) / hits;
-          points[bestIdx].y = (points[bestIdx].y * pointHits[bestIdx] + pt.y) / hits;
-          pointHits[bestIdx] = hits;
-          return bestIdx;
-        }
-
         updateProgress("点と辺を構築中", 0, segments.length, `線分: ${segments.length}`);
-        const buildYield = 2000;
-        for (let i = 0; i < segments.length; i += 1) {
-          const seg = segments[i];
-          const a = addPoint(seg.a);
-          const b = addPoint(seg.b);
-          if (a === b) continue;
-          const key = a < b ? `${a}-${b}` : `${b}-${a}`;
-          let edge = edgeMap.get(key);
-          if (!edge) {
-            edge = { a, b, sources: new Set() };
-            edgeMap.set(key, edge);
-            edges.push(edge);
-          }
-          edge.sources.add(seg.source);
+        const graph = await DerleLogic.buildGraphFromSegments(segments, snap, (done, total) => {
+          updateProgress("点と辺を構築中", done, total, `線分: ${segments.length}`);
+        });
 
-          if (i % buildYield === 0 || i === segments.length - 1) {
-            updateProgress("点と辺を構築中", i + 1, segments.length, `線分: ${segments.length}`);
-            await nextFrame();
-          }
-        }
-
-        state.graph = { points, edges };
+        state.graph = graph;
         state.polygons = [];
         clearOverlays();
         drawEdges();
 
         setStatus([
           `グラフを構築しました。`,
-          `点: ${points.length}`,
-          `辺: ${edges.length}`,
+          `点: ${graph.points.length}`,
+          `辺: ${graph.edges.length}`,
           `線分: ${segments.length}`,
           includeCoast
             ? coastLayerId
@@ -866,116 +560,14 @@
         return;
       }
 
-      const { points, edges } = state.graph;
       const minArea = Number(el.minArea.value);
-
-      const directed = [];
-      const outgoing = Array.from({ length: points.length }, () => []);
-
-      edges.forEach((edge, edgeIndex) => {
-        const a = edge.a;
-        const b = edge.b;
-        const angleAB = Math.atan2(points[b].y - points[a].y, points[b].x - points[a].x);
-        const angleBA = Math.atan2(points[a].y - points[b].y, points[a].x - points[b].x);
-        const idxAB = directed.length;
-        directed.push({ from: a, to: b, angle: angleAB, edgeIndex });
-        const idxBA = directed.length;
-        directed.push({ from: b, to: a, angle: angleBA, edgeIndex });
-        outgoing[a].push(idxAB);
-        outgoing[b].push(idxBA);
-      });
-
-      outgoing.forEach((list) => list.sort((i, j) => directed[i].angle - directed[j].angle));
-
-      const adjacency = Array.from({ length: points.length }, () => []);
-      edges.forEach((edge) => {
-        adjacency[edge.a].push(edge.b);
-        adjacency[edge.b].push(edge.a);
-      });
-
-      const components = new Array(points.length).fill(-1);
-      let componentId = 0;
-      for (let i = 0; i < points.length; i += 1) {
-        if (components[i] !== -1) continue;
-        if (adjacency[i].length === 0) continue;
-        const stack = [i];
-        components[i] = componentId;
-        while (stack.length) {
-          const v = stack.pop();
-          const neighbors = adjacency[v];
-          for (let j = 0; j < neighbors.length; j += 1) {
-            const next = neighbors[j];
-            if (components[next] === -1) {
-              components[next] = componentId;
-              stack.push(next);
-            }
-          }
-        }
-        componentId += 1;
-      }
-
-      function nextEdgeIndex(dirIndex) {
-        const dir = directed[dirIndex];
-        const v = dir.to;
-        const incomingAngle = Math.atan2(points[dir.from].y - points[v].y, points[dir.from].x - points[v].x);
-        const list = outgoing[v];
-        if (!list || list.length === 0) return null;
-        let chosen = list[list.length - 1];
-        for (let i = 0; i < list.length; i += 1) {
-          const candidate = list[i];
-          if (directed[candidate].angle < incomingAngle - 1e-10) {
-            chosen = candidate;
-          } else {
-            break;
-          }
-        }
-        return chosen;
-      }
-
-      const visited = new Array(directed.length).fill(false);
-      const faces = [];
-
-      for (let i = 0; i < directed.length; i += 1) {
-        if (visited[i]) continue;
-        const face = [];
-        let current = i;
-        let guard = 0;
-        while (!visited[current] && guard < directed.length + 10) {
-          visited[current] = true;
-          const edge = directed[current];
-          face.push(edge.from);
-          const next = nextEdgeIndex(current);
-          if (next === null) break;
-          current = next;
-          guard += 1;
-          if (current === i) break;
-        }
-
-        if (face.length < 3) continue;
-        const area = polygonArea(face, points);
-        if (Math.abs(area) < minArea) continue;
-        faces.push({ points: face, area, component: components[face[0]] });
-      }
-
-      if (faces.length === 0) {
+      const result = DerleLogic.extractPolygonsFromGraph(state.graph, minArea);
+      if (result.polygons.length === 0 && result.outerFaces.length === 0) {
         setStatus("多角形が見つかりません。間引き設定を調整するか海岸線を有効にしてください。");
         return;
       }
 
-      const outerFaces = new Set();
-      const faceGroups = new Map();
-      faces.forEach((face) => {
-        const key = face.component;
-        if (!faceGroups.has(key)) faceGroups.set(key, []);
-        faceGroups.get(key).push(face);
-      });
-      faceGroups.forEach((group) => {
-        const largest = group.reduce((max, face) => (Math.abs(face.area) > Math.abs(max.area) ? face : max), group[0]);
-        outerFaces.add(largest);
-      });
-      const polygons = faces.filter((face) => !outerFaces.has(face));
-
-      state.polygons = polygons.map((face, idx) => {
+      state.polygons = result.polygons.map((face, idx) => {
         return {
           id: idx + 1,
           area: face.area,
@@ -988,23 +580,18 @@
       drawPolygons();
       drawPoints();
 
+      const outerCount = result.outerFaces.length;
+      const outerMessage = outerCount === 0
+        ? "外側の面が見つかりませんでした。"
+        : outerCount === 1
+          ? `外側の面を除外しました: 面積 ${result.outerFaces[0].area.toFixed(2)}`
+          : `外側の面を除外しました: ${outerCount}面`;
+
       setStatus([
         `多角形を抽出しました: ${state.polygons.length}`,
-        outerFaces.size === 1
-          ? `外側の面を除外しました: 面積 ${Array.from(outerFaces)[0].area.toFixed(2)}`
-          : `外側の面を除外しました: ${outerFaces.size}面`,
+        outerMessage,
         `最小面積: ${minArea}`,
       ].join("\n"));
-    }
-
-    function polygonArea(indices, points) {
-      let sum = 0;
-      for (let i = 0; i < indices.length; i += 1) {
-        const a = points[indices[i]];
-        const b = points[indices[(i + 1) % indices.length]];
-        sum += (a.x * b.y - b.x * a.y);
-      }
-      return sum / 2;
     }
 
     function drawEdges() {
