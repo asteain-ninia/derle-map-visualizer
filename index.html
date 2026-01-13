@@ -341,8 +341,17 @@
       return state.svgDoc.getElementById(layerId) || state.svgDoc.querySelector(`[data-name='${layerId}']`);
     }
 
-    function samplePathElement(pathEl, step) {
+    function splitPathData(d) {
+      if (!d) return [];
+      const parts = d.trim().split(/(?=M)/).map((part) => part.trim()).filter(Boolean);
+      return parts;
+    }
+
+    function samplePathElement(pathEl, step, pathDataOverride) {
       const clone = pathEl.cloneNode(true);
+      if (pathDataOverride) {
+        clone.setAttribute("d", pathDataOverride);
+      }
       el.measureSvg.appendChild(clone);
       const length = clone.getTotalLength();
       const count = Math.max(2, Math.ceil(length / step));
@@ -401,20 +410,8 @@
       const elements = Array.from(layerEl.querySelectorAll("path, polyline, polygon, line"));
       const total = elements.length;
       const yieldEvery = 20;
-      for (let index = 0; index < total; index += 1) {
-        const item = elements[index];
-        let points = [];
-        if (item.tagName.toLowerCase() === "path") {
-          points = samplePathElement(item, step);
-        } else if (item.tagName.toLowerCase() === "polyline" || item.tagName.toLowerCase() === "polygon") {
-          points = samplePolylineElement(item);
-          if (item.tagName.toLowerCase() === "polygon" && points.length > 2) {
-            points.push(points[0]);
-          }
-        } else if (item.tagName.toLowerCase() === "line") {
-          points = sampleLineElement(item);
-        }
 
+      const pushSegments = (points) => {
         const cleaned = removeSequentialDuplicates(points, 1e-6);
         for (let i = 0; i < cleaned.length - 1; i += 1) {
           segments.push({
@@ -422,6 +419,34 @@
             b: cleaned[i + 1],
             source: sourceTag,
           });
+        }
+      };
+
+      for (let index = 0; index < total; index += 1) {
+        const item = elements[index];
+        const tag = item.tagName.toLowerCase();
+        if (tag === "path") {
+          const d = item.getAttribute("d") || "";
+          const subpaths = splitPathData(d);
+          if (subpaths.length === 1) {
+            const points = samplePathElement(item, step, subpaths[0]);
+            pushSegments(points);
+          } else if (subpaths.length > 1) {
+            // Illustratorなどが複数サブパスを1つのpathに入れるため分割する。
+            subpaths.forEach((subpath) => {
+              const points = samplePathElement(item, step, subpath);
+              pushSegments(points);
+            });
+          }
+        } else if (tag === "polyline" || tag === "polygon") {
+          const points = samplePolylineElement(item);
+          if (tag === "polygon" && points.length > 2) {
+            points.push(points[0]);
+          }
+          pushSegments(points);
+        } else if (tag === "line") {
+          const points = sampleLineElement(item);
+          pushSegments(points);
         }
 
         if (onProgress && (index % yieldEvery === 0 || index === total - 1)) {
