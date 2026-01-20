@@ -126,7 +126,15 @@
       height: 100%;
     }
     .overlay-svg {
+      pointer-events: auto;
+    }
+    .edge-layer,
+    .point-layer,
+    .polygon-highlight {
       pointer-events: none;
+    }
+    .polygon-layer path {
+      cursor: pointer;
     }
     .legend {
       display: grid;
@@ -209,7 +217,7 @@
   </aside>
 
   <main>
-    <div class="map-host">
+    <div id="mapHost" class="map-host">
       <div id="svgStack" class="svg-stack"></div>
     </div>
   </main>
@@ -226,6 +234,10 @@
       viewBox: null,
       graph: null,
       polygons: [],
+      polygonsGroup: null,
+      selectedPolygonId: null,
+      highlightPath: null,
+      zoom: 1,
       layerCheckboxes: new Map(),
       otherLayerElements: [],
     };
@@ -260,6 +272,7 @@
       showPolys: document.getElementById("showPolys"),
       showPoints: document.getElementById("showPoints"),
       statusBox: document.getElementById("statusBox"),
+      mapHost: document.getElementById("mapHost"),
       svgStack: document.getElementById("svgStack"),
       measureSvg: document.getElementById("measure"),
     };
@@ -279,6 +292,49 @@
     function setBuildStatus(lines) {
       const body = lines.filter(Boolean);
       setStatus(["グラフを構築中...", ...body].join("\n"));
+    }
+
+    const ZOOM_MIN = 0.5;
+    const ZOOM_MAX = 6;
+    const ZOOM_SENSITIVITY = 0.002;
+
+    function applyZoom(nextZoom, anchor) {
+      const host = el.mapHost;
+      if (!host) return;
+      const clamped = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, nextZoom));
+      if (Math.abs(clamped - state.zoom) < 1e-4) return;
+      const rect = host.getBoundingClientRect();
+      const offsetX = anchor ? anchor.x - rect.left : rect.width / 2;
+      const offsetY = anchor ? anchor.y - rect.top : rect.height / 2;
+      const startX = host.scrollLeft + offsetX;
+      const startY = host.scrollTop + offsetY;
+      const scale = clamped / state.zoom;
+
+      state.zoom = clamped;
+      el.svgStack.style.width = `${clamped * 100}%`;
+      el.svgStack.style.height = `${clamped * 100}%`;
+
+      host.scrollLeft = startX * scale - offsetX;
+      host.scrollTop = startY * scale - offsetY;
+    }
+
+    function resetZoom() {
+      state.zoom = 1;
+      el.svgStack.style.width = "100%";
+      el.svgStack.style.height = "100%";
+      if (el.mapHost) {
+        el.mapHost.scrollLeft = 0;
+        el.mapHost.scrollTop = 0;
+      }
+    }
+
+    function handleWheelZoom(event) {
+      if (!state.baseSvg) return;
+      event.preventDefault();
+      const delta = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
+      if (!Number.isFinite(delta) || delta === 0) return;
+      const factor = Math.exp(-delta * ZOOM_SENSITIVITY);
+      applyZoom(state.zoom * factor, { x: event.clientX, y: event.clientY });
     }
 
     const GEOM_EPS = 1e-6;
@@ -401,6 +457,46 @@
     function clearOverlays() {
       if (!state.overlaySvg) return;
       state.overlaySvg.innerHTML = "";
+      state.polygonsGroup = null;
+      state.selectedPolygonId = null;
+      state.highlightPath = null;
+    }
+
+    function clearPolygonHighlight() {
+      if (state.highlightPath && state.highlightPath.parentNode) {
+        state.highlightPath.parentNode.removeChild(state.highlightPath);
+      }
+      state.highlightPath = null;
+      state.selectedPolygonId = null;
+    }
+
+    function applyPolygonHighlight(pathEl) {
+      if (!state.polygonsGroup || !pathEl) return;
+      const polyId = pathEl.dataset.polyId;
+      if (!polyId) return;
+      if (state.selectedPolygonId === polyId) {
+        clearPolygonHighlight();
+        return;
+      }
+
+      clearPolygonHighlight();
+      const highlight = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      highlight.setAttribute("d", pathEl.getAttribute("d"));
+      highlight.setAttribute("fill", "rgba(0, 0, 0, 0.35)");
+      highlight.setAttribute("stroke", "none");
+      highlight.classList.add("polygon-highlight");
+      highlight.setAttribute("pointer-events", "none");
+      state.polygonsGroup.appendChild(highlight);
+      state.highlightPath = highlight;
+      state.selectedPolygonId = polyId;
+    }
+
+    function handleOverlayClick(event) {
+      if (!state.polygonsGroup) return;
+      const target = event.target instanceof Element ? event.target : null;
+      const path = target ? target.closest("path[data-poly-id]") : null;
+      if (!path || !state.polygonsGroup.contains(path)) return;
+      applyPolygonHighlight(path);
     }
 
     function loadSvgText(text) {
@@ -426,12 +522,14 @@
       const overlaySvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       overlaySvg.setAttribute("viewBox", state.viewBox);
       overlaySvg.classList.add("overlay-svg");
+      overlaySvg.addEventListener("click", handleOverlayClick);
 
       el.svgStack.appendChild(baseSvg);
       el.svgStack.appendChild(overlaySvg);
 
       state.baseSvg = baseSvg;
       state.overlaySvg = overlaySvg;
+      resetZoom();
 
       buildLayerToggles();
       refreshLayerGroupControls();
@@ -746,10 +844,12 @@
       if (!el.showEdges.checked) return;
 
       const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      group.classList.add("edge-layer");
       group.setAttribute("stroke", "#f5f5f5");
       group.setAttribute("stroke-width", "0.3");
       group.setAttribute("fill", "none");
       group.setAttribute("opacity", "0.8");
+      group.setAttribute("pointer-events", "none");
 
       state.graph.edges.forEach((edge) => {
         const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
@@ -772,6 +872,7 @@
     function drawPolygons() {
       if (!state.polygons.length || !el.showPolys.checked) return;
       const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      group.classList.add("polygon-layer");
       group.setAttribute("fill", "rgba(232, 184, 108, 0.25)");
       group.setAttribute("stroke", "#e8b86c");
       group.setAttribute("stroke-width", "0.6");
@@ -785,10 +886,12 @@
         path.setAttribute("d", d);
         path.setAttribute("fill", randomFill(poly.id));
         path.setAttribute("fill-opacity", "0.25");
+        path.dataset.polyId = String(poly.id);
         group.appendChild(path);
       });
 
       state.overlaySvg.appendChild(group);
+      state.polygonsGroup = group;
     }
 
     function randomFill(id) {
@@ -799,7 +902,9 @@
     function drawPoints() {
       if (!state.graph || !el.showPoints.checked) return;
       const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      group.classList.add("point-layer");
       group.setAttribute("fill", "#6abf69");
+      group.setAttribute("pointer-events", "none");
 
       state.graph.points.forEach((pt) => {
         const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
@@ -869,6 +974,7 @@
     });
     el.toggleLandBtn.addEventListener("click", () => toggleLayerGroup(landLayerIds));
     el.toggleOtherBtn.addEventListener("click", toggleOtherLayers);
+    el.mapHost.addEventListener("wheel", handleWheelZoom, { passive: false });
 
     [el.showEdges, el.showPolys, el.showPoints].forEach((checkbox) => {
       checkbox.addEventListener("change", () => {
