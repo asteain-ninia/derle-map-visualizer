@@ -177,6 +177,20 @@
     return (point.y - a.y) / dy;
   }
 
+  function pointSegmentProjection(point, a, b) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len2 = dx * dx + dy * dy;
+    if (len2 < EPS) return null;
+    const t = ((point.x - a.x) * dx + (point.y - a.y) * dy) / len2;
+    if (t < 0 || t > 1) return null;
+    const proj = {
+      x: a.x + dx * t,
+      y: a.y + dy * t,
+    };
+    return { t, distance: distance(point, proj) };
+  }
+
   function segmentIntersections(p1, p2, p3, p4) {
     const dx1 = p2.x - p1.x;
     const dy1 = p2.y - p1.y;
@@ -237,7 +251,15 @@
     return hits;
   }
 
-  async function splitSegmentsAtIntersections(segments, gridSize, onProgress) {
+  async function splitSegmentsAtIntersections(segments, gridSize, endpointSnap, onProgress) {
+    let snap = Number(endpointSnap) || 0;
+    let progress = onProgress;
+    if (typeof endpointSnap === "function") {
+      progress = endpointSnap;
+      snap = 0;
+    }
+    const splitEps = 1e-6;
+    const pad = snap > 0 ? snap : 0;
     const segIntersections = new Map();
     const grid = new Map();
 
@@ -246,10 +268,10 @@
     }
 
     function addToGrid(idx, seg) {
-      const minX = Math.min(seg.a.x, seg.b.x);
-      const maxX = Math.max(seg.a.x, seg.b.x);
-      const minY = Math.min(seg.a.y, seg.b.y);
-      const maxY = Math.max(seg.a.y, seg.b.y);
+      const minX = Math.min(seg.a.x, seg.b.x) - pad;
+      const maxX = Math.max(seg.a.x, seg.b.x) + pad;
+      const minY = Math.min(seg.a.y, seg.b.y) - pad;
+      const maxY = Math.max(seg.a.y, seg.b.y) + pad;
       const x0 = Math.floor(minX / gridSize);
       const x1 = Math.floor(maxX / gridSize);
       const y0 = Math.floor(minY / gridSize);
@@ -263,11 +285,24 @@
       }
     }
 
+    function addSplit(idx, t) {
+      if (!segIntersections.has(idx)) segIntersections.set(idx, []);
+      segIntersections.get(idx).push(t);
+    }
+
+    function checkEndpointSnap(point, targetSeg, targetIdx) {
+      const projection = pointSegmentProjection(point, targetSeg.a, targetSeg.b);
+      if (!projection) return;
+      if (projection.distance <= snap) {
+        addSplit(targetIdx, projection.t);
+      }
+    }
+
     const gridYield = 800;
     for (let i = 0; i < segments.length; i += 1) {
       addToGrid(i, segments[i]);
-      if (onProgress && (i % gridYield === 0 || i === segments.length - 1)) {
-        onProgress("grid", i + 1, segments.length);
+      if (progress && (i % gridYield === 0 || i === segments.length - 1)) {
+        progress("grid", i + 1, segments.length);
         await nextFrame();
       }
     }
@@ -287,18 +322,23 @@
           const segA = segments[a];
           const segB = segments[b];
           const hits = segmentIntersections(segA.a, segA.b, segB.a, segB.b);
-          if (!hits) continue;
-          for (let h = 0; h < hits.length; h += 1) {
-            const hit = hits[h];
-            if (!segIntersections.has(a)) segIntersections.set(a, []);
-            if (!segIntersections.has(b)) segIntersections.set(b, []);
-            segIntersections.get(a).push(hit.t1);
-            segIntersections.get(b).push(hit.t2);
+          if (hits) {
+            for (let h = 0; h < hits.length; h += 1) {
+              const hit = hits[h];
+              addSplit(a, hit.t1);
+              addSplit(b, hit.t2);
+            }
+          }
+          if (snap > 0) {
+            checkEndpointSnap(segA.a, segB, b);
+            checkEndpointSnap(segA.b, segB, b);
+            checkEndpointSnap(segB.a, segA, a);
+            checkEndpointSnap(segB.b, segA, a);
           }
         }
       }
-      if (onProgress && (bucketIndex % bucketYield === 0 || bucketIndex === buckets.length - 1)) {
-        onProgress("intersections", bucketIndex + 1, buckets.length);
+      if (progress && (bucketIndex % bucketYield === 0 || bucketIndex === buckets.length - 1)) {
+        progress("intersections", bucketIndex + 1, buckets.length);
         await nextFrame();
       }
     }
@@ -308,18 +348,26 @@
     for (let idx = 0; idx < segments.length; idx += 1) {
       const seg = segments[idx];
       const splits = segIntersections.get(idx) || [];
-      const sorted = [0, 1, ...splits.filter((t) => t > 1e-6 && t < 1 - 1e-6)].sort((a, b) => a - b);
-      for (let i = 0; i < sorted.length - 1; i += 1) {
-        const t0 = sorted[i];
-        const t1 = sorted[i + 1];
+      const candidates = splits.filter((t) => t > splitEps && t < 1 - splitEps);
+      const sorted = [0, ...candidates, 1].sort((a, b) => a - b);
+      const unique = [];
+      for (let i = 0; i < sorted.length; i += 1) {
+        const t = sorted[i];
+        if (unique.length === 0 || Math.abs(t - unique[unique.length - 1]) > splitEps) {
+          unique.push(t);
+        }
+      }
+      for (let i = 0; i < unique.length - 1; i += 1) {
+        const t0 = unique[i];
+        const t1 = unique[i + 1];
         const p0 = lerpPoint(seg.a, seg.b, t0);
         const p1 = lerpPoint(seg.a, seg.b, t1);
-        if (distance(p0, p1) > 1e-6) {
+        if (distance(p0, p1) > splitEps) {
           output.push({ a: p0, b: p1, source: seg.source });
         }
       }
-      if (onProgress && (idx % splitYield === 0 || idx === segments.length - 1)) {
-        onProgress("split", idx + 1, segments.length);
+      if (progress && (idx % splitYield === 0 || idx === segments.length - 1)) {
+        progress("split", idx + 1, segments.length);
         await nextFrame();
       }
     }

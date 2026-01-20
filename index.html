@@ -517,7 +517,7 @@
 
         if (split) {
           const gridSize = Math.max(step * 2, snap * 4, 1);
-          segments = await DerleLogic.splitSegmentsAtIntersections(segments, gridSize, (phase, done, total) => {
+          segments = await DerleLogic.splitSegmentsAtIntersections(segments, gridSize, snap, (phase, done, total) => {
             const label = splitPhaseLabel[phase] || phase;
             updateProgress(`交差分割: ${label}`, done, total);
           });

@@ -146,6 +146,15 @@
         expected: [{ x: 60, y: 60 }],
       },
       {
+        id: "near-tee",
+        label: "Near T junction (snap)",
+        segments: [
+          { a: { x: 10, y: 60 }, b: { x: 110, y: 60 }, source: "test" },
+          { a: { x: 60, y: 10 }, b: { x: 60, y: 59.6 }, source: "test" },
+        ],
+        expected: [{ x: 60, y: 60 }],
+      },
+      {
         id: "overlap",
         label: "Colinear overlap",
         segments: [
@@ -164,6 +173,7 @@
         expected: [{ x: 60, y: 90 }],
       },
     ];
+    const endpointSnap = 1;
 
     DerleLogic.setMeasureSvg(document.getElementById("measure"));
 
@@ -238,7 +248,7 @@
       const gridSize = 20;
       for (let i = 0; i < cases.length; i += 1) {
         const testCase = cases[i];
-        const splitSegments = await DerleLogic.splitSegmentsAtIntersections(testCase.segments, gridSize);
+        const splitSegments = await DerleLogic.splitSegmentsAtIntersections(testCase.segments, gridSize, endpointSnap);
         const endpoints = collectEndpoints(splitSegments);
         const expected = testCase.expected || [];
         const pass = expected.every((pt) => hasPoint(endpoints, pt, 0.6));
