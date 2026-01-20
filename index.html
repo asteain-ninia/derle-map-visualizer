@@ -180,7 +180,7 @@
       <label for="sampleStep">間引き間隔（地図単位）</label>
       <input id="sampleStep" type="number" min="0.2" step="0.2" value="1.2" />
       <label for="snapTolerance">吸着許容値（地図単位）</label>
-      <input id="snapTolerance" type="number" min="0.05" step="0.05" value="0.25" />
+      <input id="snapTolerance" type="number" min="0.05" step="0.05" value="1" />
       <label for="minArea">多角形の最小面積</label>
       <input id="minArea" type="number" min="0" step="10" value="50" />
       <label class="inline"><input id="includeCoast" type="checkbox" checked />陸地階層の海岸線を含める</label>
@@ -279,6 +279,114 @@
     function setBuildStatus(lines) {
       const body = lines.filter(Boolean);
       setStatus(["グラフを構築中...", ...body].join("\n"));
+    }
+
+    const GEOM_EPS = 1e-6;
+
+    function pointOnSegment(point, a, b, tol) {
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const len2 = dx * dx + dy * dy;
+      const tol2 = tol * tol;
+      if (len2 <= tol2) {
+        const dist2 = (point.x - a.x) ** 2 + (point.y - a.y) ** 2;
+        return dist2 <= tol2;
+      }
+      const t = ((point.x - a.x) * dx + (point.y - a.y) * dy) / len2;
+      if (t < 0 || t > 1) return false;
+      const projX = a.x + dx * t;
+      const projY = a.y + dy * t;
+      const dist2 = (point.x - projX) ** 2 + (point.y - projY) ** 2;
+      return dist2 <= tol2;
+    }
+
+    function pointInPolygon(point, indices, points, tol) {
+      let inside = false;
+      for (let i = 0, j = indices.length - 1; i < indices.length; j = i++) {
+        const a = points[indices[i]];
+        const b = points[indices[j]];
+        if (!a || !b) continue;
+        if (tol > 0 && pointOnSegment(point, a, b, tol)) {
+          return true;
+        }
+        const intersects = (a.y > point.y) !== (b.y > point.y)
+          && point.x < ((b.x - a.x) * (point.y - a.y)) / (b.y - a.y) + a.x;
+        if (intersects) inside = !inside;
+      }
+      return inside;
+    }
+
+    function buildPolygonData(polygons, points) {
+      return polygons.map((poly) => {
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        for (let i = 0; i < poly.points.length; i += 1) {
+          const p = points[poly.points[i]];
+          if (!p) continue;
+          if (p.x < minX) minX = p.x;
+          if (p.y < minY) minY = p.y;
+          if (p.x > maxX) maxX = p.x;
+          if (p.y > maxY) maxY = p.y;
+        }
+        return { points: poly.points, minX, minY, maxX, maxY };
+      });
+    }
+
+    function findPolygonIndex(point, polygonData, points, tol) {
+      for (let i = 0; i < polygonData.length; i += 1) {
+        const poly = polygonData[i];
+        if (point.x < poly.minX - tol || point.x > poly.maxX + tol
+          || point.y < poly.minY - tol || point.y > poly.maxY + tol) {
+          continue;
+        }
+        if (pointInPolygon(point, poly.points, points, tol)) {
+          return i;
+        }
+      }
+      return -1;
+    }
+
+    function collectSharedSeaPolygons(borderGraph, borderPolygons, snap) {
+      if (!borderGraph || borderPolygons.length === 0) {
+        return { polygonData: [], sharedPolygons: new Set(), tolerance: 0 };
+      }
+      const degrees = new Array(borderGraph.points.length).fill(0);
+      borderGraph.edges.forEach((edge) => {
+        degrees[edge.a] += 1;
+        degrees[edge.b] += 1;
+      });
+      const polygonData = buildPolygonData(borderPolygons, borderGraph.points);
+      const tolerance = Math.max(GEOM_EPS, snap * 0.1);
+      const sharedPolygons = new Set();
+
+      borderGraph.edges.forEach((edge) => {
+        if (degrees[edge.a] !== 1 && degrees[edge.b] !== 1) return;
+        const a = borderGraph.points[edge.a];
+        const b = borderGraph.points[edge.b];
+        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        const idx = findPolygonIndex(mid, polygonData, borderGraph.points, tolerance);
+        if (idx >= 0) {
+          sharedPolygons.add(idx);
+        }
+      });
+
+      return { polygonData, sharedPolygons, tolerance };
+    }
+
+    function filterCoastSegments(segments, polygonData, points, sharedPolygons, tolerance) {
+      if (!polygonData.length) return segments;
+      const filtered = [];
+      for (let i = 0; i < segments.length; i += 1) {
+        const seg = segments[i];
+        const mid = { x: (seg.a.x + seg.b.x) / 2, y: (seg.a.y + seg.b.y) / 2 };
+        const idx = findPolygonIndex(mid, polygonData, points, tolerance);
+        if (idx === -1 || sharedPolygons.has(idx)) {
+          filtered.push(seg);
+        }
+      }
+      return filtered;
     }
 
     function readFile(file) {
@@ -451,6 +559,7 @@
       }
       const step = Number(el.sampleStep.value);
       const snap = Number(el.snapTolerance.value);
+      const minArea = Number(el.minArea.value);
       const includeCoast = el.includeCoast.checked;
       const split = el.splitIntersections.checked;
 
@@ -483,14 +592,18 @@
         await DerleLogic.nextFrame();
 
         let segments = [];
+        let borderSegments = [];
+        let coastSegments = [];
+        let coastLayerId = null;
+        let excludedCoastCount = 0;
+        let sharedSeaCount = 0;
 
         updateProgress("国境界を抽出中", 0, 0);
-        const borderSegments = await DerleLogic.extractSegmentsFromLayer(borderLayer, step, "border", (done, total) => {
+        borderSegments = await DerleLogic.extractSegmentsFromLayer(borderLayer, step, "border", (done, total) => {
           updateProgress("国境界を抽出中", done, total);
         });
         segments = segments.concat(borderSegments);
 
-        let coastLayerId = null;
         if (includeCoast) {
           let coastLayer = null;
           for (let i = 0; i < landLayerIds.length; i += 1) {
@@ -505,10 +618,10 @@
 
           if (coastLayer) {
             const label = `海岸線(${coastLayerId})を抽出中`;
-            const layerSegments = await DerleLogic.extractSegmentsFromLayer(coastLayer, step, "coast", (done, total) => {
+            coastSegments = await DerleLogic.extractSegmentsFromLayer(coastLayer, step, "coast", (done, total) => {
               updateProgress(label, done, total);
             });
-            segments = segments.concat(layerSegments);
+            segments = segments.concat(coastSegments);
             await DerleLogic.nextFrame();
           } else {
             updateProgress("海岸線レイヤーが見つかりません", 0, 0);
@@ -523,9 +636,33 @@
           });
         }
 
-        updateProgress("点と辺を構築中", 0, segments.length, `線分: ${segments.length}`);
-        const graph = await DerleLogic.buildGraphFromSegments(segments, snap, (done, total) => {
-          updateProgress("点と辺を構築中", done, total, `線分: ${segments.length}`);
+        let finalSegments = segments;
+        if (includeCoast && coastSegments.length) {
+          const borderOnlySegments = segments.filter((seg) => seg.source === "border");
+          const coastOnlySegments = segments.filter((seg) => seg.source === "coast");
+
+          updateProgress("国境線の構造解析中", 0, borderOnlySegments.length);
+          const borderGraph = await DerleLogic.buildGraphFromSegments(borderOnlySegments, snap, (done, total) => {
+            updateProgress("国境線の構造解析中", done, total);
+          });
+          const borderResult = DerleLogic.extractPolygonsFromGraph(borderGraph, minArea);
+          const sharedInfo = collectSharedSeaPolygons(borderGraph, borderResult.polygons, snap);
+          sharedSeaCount = sharedInfo.sharedPolygons.size;
+
+          const filteredCoastSegments = filterCoastSegments(
+            coastOnlySegments,
+            sharedInfo.polygonData,
+            borderGraph.points,
+            sharedInfo.sharedPolygons,
+            sharedInfo.tolerance,
+          );
+          excludedCoastCount = coastOnlySegments.length - filteredCoastSegments.length;
+          finalSegments = borderOnlySegments.concat(filteredCoastSegments);
+        }
+
+        updateProgress("点と辺を構築中", 0, finalSegments.length, `線分: ${finalSegments.length}`);
+        const graph = await DerleLogic.buildGraphFromSegments(finalSegments, snap, (done, total) => {
+          updateProgress("点と辺を構築中", done, total, `線分: ${finalSegments.length}`);
         });
 
         state.graph = graph;
@@ -533,16 +670,26 @@
         clearOverlays();
         drawEdges();
 
+        let coastMessage = "";
+        if (!includeCoast) {
+          coastMessage = "海岸線を除外しました。";
+        } else if (!coastLayerId) {
+          coastMessage = "海岸線レイヤーが見つからず除外しました。";
+        } else {
+          const detail = (excludedCoastCount > 0 || sharedSeaCount > 0)
+            ? `内側除外: ${excludedCoastCount}本 / 共有海: ${sharedSeaCount}面`
+            : null;
+          coastMessage = detail
+            ? `海岸線(${coastLayerId})を含めました。${detail}`
+            : `海岸線(${coastLayerId})を含めました。`;
+        }
+
         setStatus([
           `グラフを構築しました。`,
           `点: ${graph.points.length}`,
           `辺: ${graph.edges.length}`,
-          `線分: ${segments.length}`,
-          includeCoast
-            ? coastLayerId
-              ? `海岸線(${coastLayerId})を含めました。`
-              : "海岸線レイヤーが見つからず除外しました。"
-            : "海岸線を除外しました。",
+          `線分: ${finalSegments.length}`,
+          coastMessage,
         ].join("\n"));
       } catch (error) {
         setStatus(`グラフ構築に失敗しました: ${error.message}`);
