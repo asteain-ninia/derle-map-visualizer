@@ -221,8 +221,6 @@
       <input id="sampleStep" type="number" min="0.2" step="0.2" value="1.2" />
       <label for="snapTolerance">吸着許容値（地図単位）</label>
       <input id="snapTolerance" type="number" min="0.05" step="0.05" value="1" />
-      <label for="minArea">多角形の最小面積</label>
-      <input id="minArea" type="number" min="0" step="10" value="50" />
       <label class="inline"><input id="includeCoast" type="checkbox" checked />陸地階層の海岸線を含める</label>
       <label class="inline"><input id="splitIntersections" type="checkbox" checked />線の交差で分割（推奨・遅い）</label>
     </div>
@@ -301,7 +299,6 @@
       layerToggles: document.getElementById("layerToggles"),
       sampleStep: document.getElementById("sampleStep"),
       snapTolerance: document.getElementById("snapTolerance"),
-      minArea: document.getElementById("minArea"),
       includeCoast: document.getElementById("includeCoast"),
       splitIntersections: document.getElementById("splitIntersections"),
       buildGraphBtn: document.getElementById("buildGraphBtn"),
@@ -859,7 +856,7 @@
       }
       const step = Number(el.sampleStep.value);
       const snap = Number(el.snapTolerance.value);
-      const minArea = Number(el.minArea.value);
+      const minArea = 0;
       const includeCoast = el.includeCoast.checked;
       const split = el.splitIntersections.checked;
 
@@ -1015,7 +1012,7 @@
         return;
       }
 
-      const minArea = Number(el.minArea.value);
+      const minArea = 0;
       const result = DerleLogic.extractPolygonsFromGraph(state.graph, minArea);
       if (result.polygons.length === 0 && result.outerFaces.length === 0) {
         setStatus("多角形が見つかりません。間引き設定を調整するか海岸線を有効にしてください。");
@@ -1057,7 +1054,6 @@
       setStatus([
         `多角形を抽出しました: ${state.polygons.length}`,
         outerMessage,
-        `最小面積: ${minArea}`,
       ].join("\n"));
     }
 
