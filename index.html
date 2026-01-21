@@ -282,6 +282,9 @@
       selectionOverlay: null,
       selectionBoundary: null,
       sharedSeaInfo: null,
+      rawCoastSegments: [],
+      borderCoastPointIndices: new Set(),
+      buildSnapTolerance: null,
       zoom: 1,
       layerCheckboxes: new Map(),
       otherLayerElements: [],
@@ -524,6 +527,153 @@
       return a < b ? `${a}-${b}` : `${b}-${a}`;
     }
 
+    function distanceSq(a, b) {
+      const dx = a.x - b.x;
+      const dy = a.y - b.y;
+      return dx * dx + dy * dy;
+    }
+
+    function buildPointLookup(points, snap) {
+      const cellSize = snap > 0 ? snap : GEOM_EPS;
+      const grid = new Map();
+
+      function gridKey(x, y) {
+        return `${x}:${y}`;
+      }
+
+      points.forEach((pt, idx) => {
+        const cx = Math.floor(pt.x / cellSize);
+        const cy = Math.floor(pt.y / cellSize);
+        const key = gridKey(cx, cy);
+        if (!grid.has(key)) grid.set(key, []);
+        grid.get(key).push(idx);
+      });
+
+      function findNearestIndex(pt) {
+        const maxDist = snap > 0 ? snap : GEOM_EPS;
+        const maxDist2 = maxDist * maxDist;
+        const cx = Math.floor(pt.x / cellSize);
+        const cy = Math.floor(pt.y / cellSize);
+        let bestIdx = null;
+        let bestDist2 = Infinity;
+
+        for (let dx = -1; dx <= 1; dx += 1) {
+          for (let dy = -1; dy <= 1; dy += 1) {
+            const key = gridKey(cx + dx, cy + dy);
+            const candidates = grid.get(key);
+            if (!candidates) continue;
+            for (let i = 0; i < candidates.length; i += 1) {
+              const idx = candidates[i];
+              const d2 = distanceSq(pt, points[idx]);
+              if (d2 <= maxDist2 && d2 < bestDist2) {
+                bestDist2 = d2;
+                bestIdx = idx;
+              }
+            }
+          }
+        }
+
+        return bestIdx;
+      }
+
+      return { findNearestIndex };
+    }
+
+    function collectBorderCoastPoints(segments, snap) {
+      const points = [];
+      const flags = [];
+      if (!segments || segments.length === 0) return points;
+
+      const cellSize = snap > 0 ? snap : GEOM_EPS;
+      const maxDist = snap > 0 ? snap : GEOM_EPS;
+      const maxDist2 = maxDist * maxDist;
+      const grid = new Map();
+
+      function gridKey(x, y) {
+        return `${x}:${y}`;
+      }
+
+      function addPoint(pt, flag) {
+        const cx = Math.floor(pt.x / cellSize);
+        const cy = Math.floor(pt.y / cellSize);
+        let bestIdx = null;
+        let bestDist2 = Infinity;
+
+        for (let dx = -1; dx <= 1; dx += 1) {
+          for (let dy = -1; dy <= 1; dy += 1) {
+            const key = gridKey(cx + dx, cy + dy);
+            const candidates = grid.get(key);
+            if (!candidates) continue;
+            for (let i = 0; i < candidates.length; i += 1) {
+              const idx = candidates[i];
+              const d2 = distanceSq(pt, points[idx]);
+              if (d2 <= maxDist2 && d2 < bestDist2) {
+                bestDist2 = d2;
+                bestIdx = idx;
+              }
+            }
+          }
+        }
+
+        if (bestIdx === null) {
+          const idx = points.length;
+          points.push({ x: pt.x, y: pt.y });
+          flags.push(flag);
+          const key = gridKey(cx, cy);
+          if (!grid.has(key)) grid.set(key, []);
+          grid.get(key).push(idx);
+          return;
+        }
+
+        flags[bestIdx] |= flag;
+      }
+
+      for (let i = 0; i < segments.length; i += 1) {
+        const seg = segments[i];
+        const flag = seg.source === "border" ? 1 : seg.source === "coast" ? 2 : 0;
+        if (!flag) continue;
+        addPoint(seg.a, flag);
+        addPoint(seg.b, flag);
+      }
+
+      const borderCoastPoints = [];
+      for (let i = 0; i < points.length; i += 1) {
+        if ((flags[i] & 1) && (flags[i] & 2)) {
+          borderCoastPoints.push(points[i]);
+        }
+      }
+
+      return borderCoastPoints;
+    }
+
+    function mapPointsToGraphIndices(points, graphPoints, snap) {
+      const indices = new Set();
+      if (!points || points.length === 0) return indices;
+      const lookup = buildPointLookup(graphPoints, snap);
+      points.forEach((pt) => {
+        const idx = lookup.findNearestIndex(pt);
+        if (idx !== null && idx !== undefined) {
+          indices.add(idx);
+        }
+      });
+      return indices;
+    }
+
+    function collectCoastInsidePolygons(coastSegments, polygonData, points, tolerance) {
+      const inside = new Set();
+      if (!coastSegments || coastSegments.length === 0 || polygonData.length === 0) return inside;
+
+      for (let i = 0; i < coastSegments.length; i += 1) {
+        if (inside.size === polygonData.length) break;
+        const seg = coastSegments[i];
+        const mid = { x: (seg.a.x + seg.b.x) / 2, y: (seg.a.y + seg.b.y) / 2 };
+        const idx = findPolygonIndex(mid, polygonData, points, tolerance);
+        if (idx >= 0) inside.add(idx);
+      }
+
+      return inside;
+    }
+
     function buildPolygonEdgeIndex(polygons, graph) {
       if (!graph) return null;
       const edgeSources = new Map();
@@ -549,18 +699,26 @@
       return { edgeSources, edgeToPolys };
     }
 
-    function classifyPolygons(polygons, graph, edgeSources, sharedSeaInfo) {
+    function classifyPolygons(polygons, graph, edgeSources, sharedSeaInfo, coastInfo) {
       const types = new Map();
-      polygons.forEach((poly) => {
+      const borderCoastPoints = coastInfo && coastInfo.borderCoastPoints;
+      const coastInsidePolygons = coastInfo && coastInfo.coastInsidePolygons;
+      const coastDataAvailable = !!(borderCoastPoints && coastInsidePolygons);
+      polygons.forEach((poly, polyIndex) => {
         const polyId = String(poly.id);
         let hasBorder = false;
         let hasCoast = false;
         let touchesSharedSea = false;
+        let touchesCoast = false;
 
         for (let i = 0; i < poly.points.length; i += 1) {
           const aIdx = poly.points[i];
           const bIdx = poly.points[(i + 1) % poly.points.length];
-          const sources = edgeSources.get(edgeKey(aIdx, bIdx));
+          const edge = edgeKey(aIdx, bIdx);
+          if (!touchesCoast && borderCoastPoints && (borderCoastPoints.has(aIdx) || borderCoastPoints.has(bIdx))) {
+            touchesCoast = true;
+          }
+          const sources = edgeSources.get(edge);
           if (!sources) continue;
           if (sources.has("border")) hasBorder = true;
           if (sources.has("coast")) {
@@ -581,7 +739,15 @@
         if (hasBorder && hasCoast) {
           type = touchesSharedSea ? "共有する海" : "海岸線まで国境界";
         } else if (hasBorder) {
-          type = "海まで国境線";
+          if (!coastDataAvailable) {
+            type = "海まで国境線";
+          } else if (touchesCoast) {
+            type = "海まで国境線";
+          } else if (coastInsidePolygons.has(polyIndex)) {
+            type = "完全島国";
+          } else {
+            type = "内陸国";
+          }
         } else if (hasCoast) {
           type = "島国";
         }
@@ -894,6 +1060,9 @@
         state.sharedSeaInfo = null;
         state.polygonEdgeIndex = null;
         state.polygonTypes.clear();
+        state.rawCoastSegments = [];
+        state.borderCoastPointIndices = new Set();
+        state.buildSnapTolerance = snap;
         clearOverlays();
         setBuildStatus(["準備中..."]);
         await DerleLogic.nextFrame();
@@ -901,6 +1070,8 @@
         let segments = [];
         let borderSegments = [];
         let coastSegments = [];
+        let rawCoastSegments = [];
+        let borderCoastPoints = [];
         let coastLayerId = null;
         let excludedCoastCount = 0;
         let sharedSeaCount = 0;
@@ -945,6 +1116,11 @@
           });
         }
 
+        if (includeCoast && coastSegments.length) {
+          rawCoastSegments = segments.filter((seg) => seg.source === "coast");
+          borderCoastPoints = collectBorderCoastPoints(segments, snap);
+        }
+
         let finalSegments = segments;
         if (includeCoast && coastSegments.length) {
           const borderOnlySegments = segments.filter((seg) => seg.source === "border");
@@ -978,6 +1154,10 @@
         state.sharedSeaInfo = sharedInfo && borderGraph
           ? { ...sharedInfo, points: borderGraph.points }
           : null;
+        if (borderCoastPoints.length && graph.points.length) {
+          state.borderCoastPointIndices = mapPointsToGraphIndices(borderCoastPoints, graph.points, snap);
+        }
+        state.rawCoastSegments = rawCoastSegments;
         state.polygons = [];
         clearOverlays();
         drawEdges();
@@ -1039,12 +1219,31 @@
       state.polygonEdgeIndex = null;
       state.polygonTypes.clear();
       state.polygonEdgeIndex = buildPolygonEdgeIndex(state.polygons, state.graph);
+      let coastInfo = null;
+      if (state.rawCoastSegments && state.rawCoastSegments.length) {
+        const snap = Number.isFinite(state.buildSnapTolerance)
+          ? state.buildSnapTolerance
+          : Number(el.snapTolerance.value);
+        const tolerance = Math.max(GEOM_EPS, snap * 0.1);
+        const polygonData = buildPolygonData(state.polygons, state.graph.points);
+        const coastInsidePolygons = collectCoastInsidePolygons(
+          state.rawCoastSegments,
+          polygonData,
+          state.graph.points,
+          tolerance,
+        );
+        coastInfo = {
+          borderCoastPoints: state.borderCoastPointIndices || new Set(),
+          coastInsidePolygons,
+        };
+      }
       if (state.polygonEdgeIndex) {
         state.polygonTypes = classifyPolygons(
           state.polygons,
           state.graph,
           state.polygonEdgeIndex.edgeSources,
           state.sharedSeaInfo,
+          coastInfo,
         );
       }
       drawEdges();
@@ -1132,6 +1331,8 @@
 
     const POLY_TYPE_COLORS = {
       "海まで国境線": "#5b8def",
+      "内陸国": "#9c8f3a",
+      "完全島国": "#c46a6a",
       "海岸線まで国境界": "#e8b86c",
       "共有する海": "#6abf69",
       "島国": "#d48b5f",
@@ -1139,6 +1340,8 @@
     };
     const POLY_TYPE_ORDER = [
       "海まで国境線",
+      "内陸国",
+      "完全島国",
       "海岸線まで国境界",
       "共有する海",
       "島国",
