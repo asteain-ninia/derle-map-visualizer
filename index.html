@@ -140,6 +140,38 @@
       display: grid;
       gap: 6px;
     }
+    .type-legend {
+      display: none;
+      gap: 6px;
+      margin-top: 6px;
+      padding: 8px;
+      border-radius: 6px;
+      border: 1px solid var(--panel-border);
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .type-legend-title {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .type-legend-items {
+      display: grid;
+      gap: 4px;
+    }
+    .type-legend-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text);
+    }
+    .type-legend-swatch {
+      width: 12px;
+      height: 12px;
+      border-radius: 2px;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+    }
     .legend label {
       font-size: 12px;
       margin: 0;
@@ -207,6 +239,11 @@
       <h2>表示</h2>
       <label class="inline"><input id="showEdges" type="checkbox" checked />辺を表示</label>
       <label class="inline"><input id="showPolys" type="checkbox" checked />多角形を表示</label>
+      <label class="inline"><input id="showTypes" type="checkbox" />国タイプで色分け（デバッグ）</label>
+      <div id="typeLegend" class="type-legend">
+        <div class="type-legend-title">凡例</div>
+        <div id="typeLegendItems" class="type-legend-items"></div>
+      </div>
       <label class="inline"><input id="showPoints" type="checkbox" />点を表示</label>
     </div>
 
@@ -235,8 +272,13 @@
       graph: null,
       polygons: [],
       polygonsGroup: null,
-      selectedPolygonId: null,
-      highlightPath: null,
+      polygonPaths: new Map(),
+      polygonEdgeIndex: null,
+      polygonTypes: new Map(),
+      selectedPolygons: new Set(),
+      selectionOverlay: null,
+      selectionBoundary: null,
+      sharedSeaInfo: null,
       zoom: 1,
       layerCheckboxes: new Map(),
       otherLayerElements: [],
@@ -270,8 +312,11 @@
       toggleOtherBtn: document.getElementById("toggleOtherBtn"),
       showEdges: document.getElementById("showEdges"),
       showPolys: document.getElementById("showPolys"),
+      showTypes: document.getElementById("showTypes"),
       showPoints: document.getElementById("showPoints"),
       statusBox: document.getElementById("statusBox"),
+      typeLegend: document.getElementById("typeLegend"),
+      typeLegendItems: document.getElementById("typeLegendItems"),
       mapHost: document.getElementById("mapHost"),
       svgStack: document.getElementById("svgStack"),
       measureSvg: document.getElementById("measure"),
@@ -295,7 +340,7 @@
     }
 
     const ZOOM_MIN = 0.5;
-    const ZOOM_MAX = 6;
+    const ZOOM_MAX = 20;
     const ZOOM_SENSITIVITY = 0.002;
 
     function applyZoom(nextZoom, anchor) {
@@ -458,45 +503,202 @@
       if (!state.overlaySvg) return;
       state.overlaySvg.innerHTML = "";
       state.polygonsGroup = null;
-      state.selectedPolygonId = null;
-      state.highlightPath = null;
+      state.polygonPaths.clear();
+      state.selectedPolygons.clear();
+      state.selectionOverlay = null;
+      state.selectionBoundary = null;
     }
 
-    function clearPolygonHighlight() {
-      if (state.highlightPath && state.highlightPath.parentNode) {
-        state.highlightPath.parentNode.removeChild(state.highlightPath);
-      }
-      state.highlightPath = null;
-      state.selectedPolygonId = null;
+    function parseViewBox(viewBox) {
+      if (!viewBox) return null;
+      const parts = viewBox.trim().split(/[\s,]+/).map(Number);
+      if (parts.length !== 4 || parts.some((v) => !Number.isFinite(v))) return null;
+      return { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };
     }
 
-    function applyPolygonHighlight(pathEl) {
-      if (!state.polygonsGroup || !pathEl) return;
-      const polyId = pathEl.dataset.polyId;
-      if (!polyId) return;
-      if (state.selectedPolygonId === polyId) {
-        clearPolygonHighlight();
-        return;
-      }
+    function edgeKey(a, b) {
+      return a < b ? `${a}-${b}` : `${b}-${a}`;
+    }
 
-      clearPolygonHighlight();
-      const highlight = document.createElementNS("http://www.w3.org/2000/svg", "path");
-      highlight.setAttribute("d", pathEl.getAttribute("d"));
-      highlight.setAttribute("fill", "rgba(0, 0, 0, 0.35)");
-      highlight.setAttribute("stroke", "none");
-      highlight.classList.add("polygon-highlight");
-      highlight.setAttribute("pointer-events", "none");
-      state.polygonsGroup.appendChild(highlight);
-      state.highlightPath = highlight;
-      state.selectedPolygonId = polyId;
+    function buildPolygonEdgeIndex(polygons, graph) {
+      if (!graph) return null;
+      const edgeSources = new Map();
+      graph.edges.forEach((edge) => {
+        edgeSources.set(edgeKey(edge.a, edge.b), edge.sources);
+      });
+
+      const edgeToPolys = new Map();
+      polygons.forEach((poly) => {
+        const polyId = String(poly.id);
+        const pts = poly.points;
+        for (let i = 0; i < pts.length; i += 1) {
+          const a = pts[i];
+          const b = pts[(i + 1) % pts.length];
+          const key = edgeKey(a, b);
+          if (!edgeToPolys.has(key)) {
+            edgeToPolys.set(key, { a, b, polys: new Set() });
+          }
+          edgeToPolys.get(key).polys.add(polyId);
+        }
+      });
+
+      return { edgeSources, edgeToPolys };
+    }
+
+    function classifyPolygons(polygons, graph, edgeSources, sharedSeaInfo) {
+      const types = new Map();
+      polygons.forEach((poly) => {
+        const polyId = String(poly.id);
+        let hasBorder = false;
+        let hasCoast = false;
+        let touchesSharedSea = false;
+
+        for (let i = 0; i < poly.points.length; i += 1) {
+          const aIdx = poly.points[i];
+          const bIdx = poly.points[(i + 1) % poly.points.length];
+          const sources = edgeSources.get(edgeKey(aIdx, bIdx));
+          if (!sources) continue;
+          if (sources.has("border")) hasBorder = true;
+          if (sources.has("coast")) {
+            hasCoast = true;
+            if (!touchesSharedSea && sharedSeaInfo && sharedSeaInfo.polygonData.length) {
+              const a = graph.points[aIdx];
+              const b = graph.points[bIdx];
+              const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+              const idx = findPolygonIndex(mid, sharedSeaInfo.polygonData, sharedSeaInfo.points, sharedSeaInfo.tolerance);
+              if (idx >= 0 && sharedSeaInfo.sharedPolygons.has(idx)) {
+                touchesSharedSea = true;
+              }
+            }
+          }
+        }
+
+        let type = "不明";
+        if (hasBorder && hasCoast) {
+          type = touchesSharedSea ? "共有する海" : "海岸線まで国境界";
+        } else if (hasBorder) {
+          type = "海まで国境線";
+        } else if (hasCoast) {
+          type = "島国";
+        }
+        types.set(polyId, type);
+      });
+
+      return types;
+    }
+
+    function updatePolygonStrokes() {
+      const selected = state.selectedPolygons;
+      state.polygonPaths.forEach((path, id) => {
+        if (selected.has(id)) {
+          path.setAttribute("stroke", "none");
+        } else {
+          path.setAttribute("stroke", path.dataset.stroke || "#e8b86c");
+          path.setAttribute("stroke-width", path.dataset.strokeWidth || "0.6");
+        }
+      });
+    }
+
+    function updateSelectionOverlay() {
+      if (!state.overlaySvg) return;
+      if (state.selectionOverlay && state.selectionOverlay.parentNode) {
+        state.selectionOverlay.parentNode.removeChild(state.selectionOverlay);
+      }
+      state.selectionOverlay = null;
+      if (state.selectedPolygons.size === 0) return;
+
+      const vb = parseViewBox(state.viewBox);
+      if (!vb) return;
+      const dParts = [
+        `M${vb.x} ${vb.y} H${vb.x + vb.width} V${vb.y + vb.height} H${vb.x} Z`,
+      ];
+      state.selectedPolygons.forEach((id) => {
+        const path = state.polygonPaths.get(id);
+        if (path) {
+          dParts.push(path.getAttribute("d"));
+        }
+      });
+      const overlay = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      overlay.setAttribute("d", dParts.join(" "));
+      overlay.setAttribute("fill", "rgba(0, 0, 0, 0.35)");
+      overlay.setAttribute("fill-rule", "evenodd");
+      overlay.classList.add("polygon-highlight");
+      overlay.setAttribute("pointer-events", "none");
+      state.overlaySvg.appendChild(overlay);
+      state.selectionOverlay = overlay;
+    }
+
+    function updateSelectionBoundary() {
+      if (!state.overlaySvg) return;
+      if (state.selectionBoundary && state.selectionBoundary.parentNode) {
+        state.selectionBoundary.parentNode.removeChild(state.selectionBoundary);
+      }
+      state.selectionBoundary = null;
+      if (!state.graph || !state.polygonEdgeIndex || state.selectedPolygons.size === 0) return;
+
+      const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      group.setAttribute("fill", "none");
+      group.setAttribute("stroke", "#e8b86c");
+      group.setAttribute("stroke-width", "0.6");
+      group.setAttribute("pointer-events", "none");
+
+      state.polygonEdgeIndex.edgeToPolys.forEach((info) => {
+        if (info.polys.size !== 1) return;
+        let onlyPolyId = null;
+        info.polys.forEach((id) => {
+          onlyPolyId = id;
+        });
+        if (!state.selectedPolygons.has(onlyPolyId)) return;
+        const a = state.graph.points[info.a];
+        const b = state.graph.points[info.b];
+        if (!a || !b) return;
+        const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        line.setAttribute("x1", a.x);
+        line.setAttribute("y1", a.y);
+        line.setAttribute("x2", b.x);
+        line.setAttribute("y2", b.y);
+        group.appendChild(line);
+      });
+
+      state.overlaySvg.appendChild(group);
+      state.selectionBoundary = group;
+    }
+
+    function updateSelectionDisplay() {
+      updatePolygonStrokes();
+      updateSelectionOverlay();
+      updateSelectionBoundary();
     }
 
     function handleOverlayClick(event) {
       if (!state.polygonsGroup) return;
       const target = event.target instanceof Element ? event.target : null;
       const path = target ? target.closest("path[data-poly-id]") : null;
-      if (!path || !state.polygonsGroup.contains(path)) return;
-      applyPolygonHighlight(path);
+      if (!path || !state.polygonsGroup.contains(path)) {
+        if (!event.shiftKey && state.selectedPolygons.size) {
+          state.selectedPolygons.clear();
+          updateSelectionDisplay();
+        }
+        return;
+      }
+      const polyId = path.dataset.polyId;
+      if (!polyId) return;
+      const additive = event.shiftKey;
+      if (additive) {
+        if (state.selectedPolygons.has(polyId)) {
+          state.selectedPolygons.delete(polyId);
+        } else {
+          state.selectedPolygons.add(polyId);
+        }
+      } else {
+        if (state.selectedPolygons.size === 1 && state.selectedPolygons.has(polyId)) {
+          state.selectedPolygons.clear();
+        } else {
+          state.selectedPolygons.clear();
+          state.selectedPolygons.add(polyId);
+        }
+      }
+      updateSelectionDisplay();
     }
 
     function loadSvgText(text) {
@@ -685,6 +887,9 @@
       try {
         state.graph = null;
         state.polygons = [];
+        state.sharedSeaInfo = null;
+        state.polygonEdgeIndex = null;
+        state.polygonTypes.clear();
         clearOverlays();
         setBuildStatus(["準備中..."]);
         await DerleLogic.nextFrame();
@@ -695,6 +900,8 @@
         let coastLayerId = null;
         let excludedCoastCount = 0;
         let sharedSeaCount = 0;
+        let sharedInfo = null;
+        let borderGraph = null;
 
         updateProgress("国境界を抽出中", 0, 0);
         borderSegments = await DerleLogic.extractSegmentsFromLayer(borderLayer, step, "border", (done, total) => {
@@ -740,11 +947,11 @@
           const coastOnlySegments = segments.filter((seg) => seg.source === "coast");
 
           updateProgress("国境線の構造解析中", 0, borderOnlySegments.length);
-          const borderGraph = await DerleLogic.buildGraphFromSegments(borderOnlySegments, snap, (done, total) => {
+          borderGraph = await DerleLogic.buildGraphFromSegments(borderOnlySegments, snap, (done, total) => {
             updateProgress("国境線の構造解析中", done, total);
           });
           const borderResult = DerleLogic.extractPolygonsFromGraph(borderGraph, minArea);
-          const sharedInfo = collectSharedSeaPolygons(borderGraph, borderResult.polygons, snap);
+          sharedInfo = collectSharedSeaPolygons(borderGraph, borderResult.polygons, snap);
           sharedSeaCount = sharedInfo.sharedPolygons.size;
 
           const filteredCoastSegments = filterCoastSegments(
@@ -764,6 +971,9 @@
         });
 
         state.graph = graph;
+        state.sharedSeaInfo = sharedInfo && borderGraph
+          ? { ...sharedInfo, points: borderGraph.points }
+          : null;
         state.polygons = [];
         clearOverlays();
         drawEdges();
@@ -817,10 +1027,22 @@
           id: idx + 1,
           area: face.area,
           points: face.points,
+          fill: randomFill(idx + 1),
         };
       });
 
       clearOverlays();
+      state.polygonEdgeIndex = null;
+      state.polygonTypes.clear();
+      state.polygonEdgeIndex = buildPolygonEdgeIndex(state.polygons, state.graph);
+      if (state.polygonEdgeIndex) {
+        state.polygonTypes = classifyPolygons(
+          state.polygons,
+          state.graph,
+          state.polygonEdgeIndex.edgeSources,
+          state.sharedSeaInfo,
+        );
+      }
       drawEdges();
       drawPolygons();
       drawPoints();
@@ -876,6 +1098,7 @@
       group.setAttribute("fill", "rgba(232, 184, 108, 0.25)");
       group.setAttribute("stroke", "#e8b86c");
       group.setAttribute("stroke-width", "0.6");
+      state.polygonPaths.clear();
 
       state.polygons.forEach((poly) => {
         const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
@@ -884,19 +1107,76 @@
           return `${i === 0 ? "M" : "L"}${p.x} ${p.y}`;
         }).join(" ") + " Z";
         path.setAttribute("d", d);
-        path.setAttribute("fill", randomFill(poly.id));
+        path.setAttribute("fill", getPolygonFill(poly));
         path.setAttribute("fill-opacity", "0.25");
+        path.dataset.stroke = "#e8b86c";
+        path.dataset.strokeWidth = "0.6";
         path.dataset.polyId = String(poly.id);
+        state.polygonPaths.set(String(poly.id), path);
         group.appendChild(path);
       });
 
       state.overlaySvg.appendChild(group);
       state.polygonsGroup = group;
+      updateSelectionDisplay();
     }
 
     function randomFill(id) {
       const hue = (id * 47) % 360;
       return `hsl(${hue} 60% 60%)`;
+    }
+
+    const POLY_TYPE_COLORS = {
+      "海まで国境線": "#5b8def",
+      "海岸線まで国境界": "#e8b86c",
+      "共有する海": "#6abf69",
+      "島国": "#d48b5f",
+      "不明": "#9aa3b2",
+    };
+    const POLY_TYPE_ORDER = [
+      "海まで国境線",
+      "海岸線まで国境界",
+      "共有する海",
+      "島国",
+      "不明",
+    ];
+
+    function buildTypeLegend() {
+      if (!el.typeLegendItems) return;
+      el.typeLegendItems.innerHTML = "";
+      POLY_TYPE_ORDER.forEach((label) => {
+        const row = document.createElement("div");
+        row.classList.add("type-legend-item");
+        const swatch = document.createElement("span");
+        swatch.classList.add("type-legend-swatch");
+        swatch.style.background = POLY_TYPE_COLORS[label] || POLY_TYPE_COLORS["不明"];
+        const text = document.createElement("span");
+        text.textContent = label;
+        row.appendChild(swatch);
+        row.appendChild(text);
+        el.typeLegendItems.appendChild(row);
+      });
+    }
+
+    function updateTypeLegendVisibility() {
+      if (!el.typeLegend) return;
+      el.typeLegend.style.display = el.showTypes.checked ? "grid" : "none";
+    }
+
+    function getPolygonFill(poly) {
+      if (el.showTypes.checked) {
+        const type = state.polygonTypes.get(String(poly.id)) || "不明";
+        return POLY_TYPE_COLORS[type] || POLY_TYPE_COLORS["不明"];
+      }
+      return poly.fill || randomFill(poly.id);
+    }
+
+    function updatePolygonFills() {
+      state.polygons.forEach((poly) => {
+        const path = state.polygonPaths.get(String(poly.id));
+        if (!path) return;
+        path.setAttribute("fill", getPolygonFill(poly));
+      });
     }
 
     function drawPoints() {
@@ -975,6 +1255,10 @@
     el.toggleLandBtn.addEventListener("click", () => toggleLayerGroup(landLayerIds));
     el.toggleOtherBtn.addEventListener("click", toggleOtherLayers);
     el.mapHost.addEventListener("wheel", handleWheelZoom, { passive: false });
+    el.showTypes.addEventListener("change", () => {
+      updatePolygonFills();
+      updateTypeLegendVisibility();
+    });
 
     [el.showEdges, el.showPolys, el.showPoints].forEach((checkbox) => {
       checkbox.addEventListener("change", () => {
@@ -984,6 +1268,9 @@
         drawPoints();
       });
     });
+
+    buildTypeLegend();
+    updateTypeLegendVisibility();
   </script>
 </body>
 </html>
