@@ -66,6 +66,9 @@
       background: #10131a;
       color: var(--text);
     }
+    input[type="range"] {
+      width: 100%;
+    }
     input[type="checkbox"] {
       transform: translateY(2px);
       margin-right: 6px;
@@ -237,6 +240,8 @@
       <h2>表示</h2>
       <label class="inline"><input id="showEdges" type="checkbox" checked />辺を表示</label>
       <label class="inline"><input id="showPolys" type="checkbox" checked />多角形を表示</label>
+      <label for="polyOpacity">多角形の透明度 <span id="polyOpacityValue" class="note">0.25</span></label>
+      <input id="polyOpacity" type="range" min="0" max="1" step="0.05" value="0.25" />
       <label class="inline"><input id="showTypes" type="checkbox" />国タイプで色分け（デバッグ）</label>
       <div id="typeLegend" class="type-legend">
         <div class="type-legend-title">凡例</div>
@@ -309,6 +314,8 @@
       toggleOtherBtn: document.getElementById("toggleOtherBtn"),
       showEdges: document.getElementById("showEdges"),
       showPolys: document.getElementById("showPolys"),
+      polyOpacity: document.getElementById("polyOpacity"),
+      polyOpacityValue: document.getElementById("polyOpacityValue"),
       showTypes: document.getElementById("showTypes"),
       showPoints: document.getElementById("showPoints"),
       statusBox: document.getElementById("statusBox"),
@@ -1090,6 +1097,7 @@
     function drawPolygons() {
       if (!state.polygons.length || !el.showPolys.checked) return;
       const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      const opacity = getPolygonOpacity();
       group.classList.add("polygon-layer");
       group.setAttribute("fill", "rgba(232, 184, 108, 0.25)");
       group.setAttribute("stroke", "#e8b86c");
@@ -1104,7 +1112,7 @@
         }).join(" ") + " Z";
         path.setAttribute("d", d);
         path.setAttribute("fill", getPolygonFill(poly));
-        path.setAttribute("fill-opacity", "0.25");
+        path.setAttribute("fill-opacity", opacity);
         path.dataset.stroke = "#e8b86c";
         path.dataset.strokeWidth = "0.6";
         path.dataset.polyId = String(poly.id);
@@ -1165,6 +1173,25 @@
         return POLY_TYPE_COLORS[type] || POLY_TYPE_COLORS["不明"];
       }
       return poly.fill || randomFill(poly.id);
+    }
+
+    function getPolygonOpacity() {
+      if (!el.polyOpacity) return 0.25;
+      const value = Number(el.polyOpacity.value);
+      if (!Number.isFinite(value)) return 0.25;
+      return Math.min(1, Math.max(0, value));
+    }
+
+    function updatePolygonOpacityLabel() {
+      if (!el.polyOpacityValue) return;
+      el.polyOpacityValue.textContent = getPolygonOpacity().toFixed(2);
+    }
+
+    function updatePolygonOpacity() {
+      const opacity = getPolygonOpacity();
+      state.polygonPaths.forEach((path) => {
+        path.setAttribute("fill-opacity", opacity);
+      });
     }
 
     function updatePolygonFills() {
@@ -1255,6 +1282,12 @@
       updatePolygonFills();
       updateTypeLegendVisibility();
     });
+    if (el.polyOpacity) {
+      el.polyOpacity.addEventListener("input", () => {
+        updatePolygonOpacityLabel();
+        updatePolygonOpacity();
+      });
+    }
 
     [el.showEdges, el.showPolys, el.showPoints].forEach((checkbox) => {
       checkbox.addEventListener("change", () => {
@@ -1267,6 +1300,7 @@
 
     buildTypeLegend();
     updateTypeLegendVisibility();
+    updatePolygonOpacityLabel();
   </script>
 </body>
 </html>
