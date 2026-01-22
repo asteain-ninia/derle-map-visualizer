@@ -224,8 +224,6 @@
       <input id="sampleStep" type="number" min="0.2" step="0.2" value="1.2" />
       <label for="snapTolerance">吸着許容値（地図単位）</label>
       <input id="snapTolerance" type="number" min="0.05" step="0.05" value="1" />
-      <label class="inline"><input id="includeCoast" type="checkbox" checked />陸地階層の海岸線を含める</label>
-      <label class="inline"><input id="splitIntersections" type="checkbox" checked />線の交差で分割（推奨・遅い）</label>
     </div>
 
     <div class="group">
@@ -307,8 +305,6 @@
       layerToggles: document.getElementById("layerToggles"),
       sampleStep: document.getElementById("sampleStep"),
       snapTolerance: document.getElementById("snapTolerance"),
-      includeCoast: document.getElementById("includeCoast"),
-      splitIntersections: document.getElementById("splitIntersections"),
       buildGraphBtn: document.getElementById("buildGraphBtn"),
       extractBtn: document.getElementById("extractBtn"),
       exportBtn: document.getElementById("exportBtn"),
@@ -1030,8 +1026,6 @@
       const step = Number(el.sampleStep.value);
       const snap = Number(el.snapTolerance.value);
       const minArea = 0;
-      const includeCoast = el.includeCoast.checked;
-      const split = el.splitIntersections.checked;
 
       const borderLayer = getLayer("_国境界");
       if (!borderLayer) {
@@ -1084,45 +1078,41 @@
         });
         segments = segments.concat(borderSegments);
 
-        if (includeCoast) {
-          let coastLayer = null;
-          for (let i = 0; i < landLayerIds.length; i += 1) {
-            const id = landLayerIds[i];
-            const layer = getLayer(id);
-            if (layer) {
-              coastLayer = layer;
-              coastLayerId = id;
-              break;
-            }
-          }
-
-          if (coastLayer) {
-            const label = `海岸線(${coastLayerId})を抽出中`;
-            coastSegments = await DerleLogic.extractSegmentsFromLayer(coastLayer, step, "coast", (done, total) => {
-              updateProgress(label, done, total);
-            });
-            segments = segments.concat(coastSegments);
-            await DerleLogic.nextFrame();
-          } else {
-            updateProgress("海岸線レイヤーが見つかりません", 0, 0);
+        let coastLayer = null;
+        for (let i = 0; i < landLayerIds.length; i += 1) {
+          const id = landLayerIds[i];
+          const layer = getLayer(id);
+          if (layer) {
+            coastLayer = layer;
+            coastLayerId = id;
+            break;
           }
         }
 
-        if (split) {
-          const gridSize = Math.max(step * 2, snap * 4, 1);
-          segments = await DerleLogic.splitSegmentsAtIntersections(segments, gridSize, snap, (phase, done, total) => {
-            const label = splitPhaseLabel[phase] || phase;
-            updateProgress(`交差分割: ${label}`, done, total);
+        if (coastLayer) {
+          const label = `海岸線(${coastLayerId})を抽出中`;
+          coastSegments = await DerleLogic.extractSegmentsFromLayer(coastLayer, step, "coast", (done, total) => {
+            updateProgress(label, done, total);
           });
+          segments = segments.concat(coastSegments);
+          await DerleLogic.nextFrame();
+        } else {
+          updateProgress("海岸線レイヤーが見つかりません", 0, 0);
         }
 
-        if (includeCoast && coastSegments.length) {
+        const gridSize = Math.max(step * 2, snap * 4, 1);
+        segments = await DerleLogic.splitSegmentsAtIntersections(segments, gridSize, snap, (phase, done, total) => {
+          const label = splitPhaseLabel[phase] || phase;
+          updateProgress(`交差分割: ${label}`, done, total);
+        });
+
+        if (coastSegments.length) {
           rawCoastSegments = segments.filter((seg) => seg.source === "coast");
           borderCoastPoints = collectBorderCoastPoints(segments, snap);
         }
 
         let finalSegments = segments;
-        if (includeCoast && coastSegments.length) {
+        if (coastSegments.length) {
           const borderOnlySegments = segments.filter((seg) => seg.source === "border");
           const coastOnlySegments = segments.filter((seg) => seg.source === "coast");
 
@@ -1163,9 +1153,7 @@
         drawEdges();
 
         let coastMessage = "";
-        if (!includeCoast) {
-          coastMessage = "海岸線を除外しました。";
-        } else if (!coastLayerId) {
+        if (!coastLayerId) {
           coastMessage = "海岸線レイヤーが見つからず除外しました。";
         } else {
           const detail = (excludedCoastCount > 0 || sharedSeaCount > 0)
@@ -1440,7 +1428,7 @@
           createdAt: new Date().toISOString(),
           sampleStep: Number(el.sampleStep.value),
           snapTolerance: Number(el.snapTolerance.value),
-          coastlineIncluded: el.includeCoast.checked,
+          coastlineIncluded: true,
         },
         points: state.graph.points.map((pt) => ({ x: pt.x, y: pt.y })),
         edges: edgeOutput,
