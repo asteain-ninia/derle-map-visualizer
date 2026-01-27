@@ -1,5 +1,6 @@
 ﻿<!doctype html>
 <html lang="ja">
+
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -15,7 +16,11 @@
       --warn: #e8b86c;
       --danger: #e06c75;
     }
-    * { box-sizing: border-box; }
+
+    * {
+      box-sizing: border-box;
+    }
+
     body {
       margin: 0;
       font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
@@ -25,20 +30,24 @@
       grid-template-columns: 320px 1fr;
       height: 100vh;
     }
+
     aside {
       border-right: 1px solid var(--panel-border);
       background: var(--panel);
       padding: 16px;
       overflow: auto;
     }
+
     main {
       position: relative;
       overflow: hidden;
     }
+
     h1 {
       font-size: 18px;
       margin: 0 0 12px;
     }
+
     .group {
       border: 1px solid var(--panel-border);
       padding: 12px;
@@ -46,6 +55,7 @@
       margin-bottom: 12px;
       background: rgba(255, 255, 255, 0.02);
     }
+
     .group h2 {
       font-size: 13px;
       color: var(--muted);
@@ -53,12 +63,17 @@
       text-transform: uppercase;
       letter-spacing: 0.08em;
     }
+
     label {
       display: block;
       font-size: 12px;
       margin: 8px 0 4px;
     }
-    input[type="number"], input[type="text"], input[type="file"], select {
+
+    input[type="number"],
+    input[type="text"],
+    input[type="file"],
+    select {
       width: 100%;
       padding: 6px 8px;
       border-radius: 6px;
@@ -66,13 +81,16 @@
       background: #10131a;
       color: var(--text);
     }
+
     input[type="range"] {
       width: 100%;
     }
+
     input[type="checkbox"] {
       transform: translateY(2px);
       margin-right: 6px;
     }
+
     button {
       width: 100%;
       margin-top: 8px;
@@ -84,20 +102,24 @@
       font-weight: 600;
       cursor: pointer;
     }
+
     button.secondary {
       background: transparent;
       color: var(--text);
       border-color: var(--panel-border);
     }
+
     button.danger {
       background: var(--danger);
       color: #1a1113;
     }
+
     .note {
       font-size: 11px;
       color: var(--muted);
       line-height: 1.4;
     }
+
     .status {
       font-size: 12px;
       line-height: 1.4;
@@ -107,6 +129,7 @@
       border-radius: 6px;
       white-space: pre-line;
     }
+
     .map-host {
       position: absolute;
       inset: 0;
@@ -114,6 +137,7 @@
         radial-gradient(circle at bottom right, rgba(232, 184, 108, 0.08), transparent 50%);
       overflow: auto;
     }
+
     .svg-stack {
       position: relative;
       width: 100%;
@@ -121,6 +145,7 @@
       min-width: 600px;
       min-height: 400px;
     }
+
     .base-svg,
     .overlay-svg {
       position: absolute;
@@ -128,21 +153,26 @@
       width: 100%;
       height: 100%;
     }
+
     .overlay-svg {
       pointer-events: auto;
     }
+
     .edge-layer,
     .point-layer,
     .polygon-highlight {
       pointer-events: none;
     }
+
     .polygon-layer path {
       cursor: pointer;
     }
+
     .legend {
       display: grid;
       gap: 6px;
     }
+
     .type-legend {
       display: none;
       gap: 6px;
@@ -152,16 +182,19 @@
       border: 1px solid var(--panel-border);
       background: rgba(255, 255, 255, 0.02);
     }
+
     .type-legend-title {
       font-size: 11px;
       color: var(--muted);
       text-transform: uppercase;
       letter-spacing: 0.08em;
     }
+
     .type-legend-items {
       display: grid;
       gap: 4px;
     }
+
     .type-legend-item {
       display: flex;
       align-items: center;
@@ -169,35 +202,67 @@
       font-size: 11px;
       color: var(--text);
     }
+
     .type-legend-swatch {
       width: 12px;
       height: 12px;
       border-radius: 2px;
       border: 1px solid rgba(255, 255, 255, 0.2);
     }
+
     .legend label {
       font-size: 12px;
       margin: 0;
     }
+
     .layer-actions {
       display: grid;
       gap: 6px;
       margin-top: 10px;
     }
+
     .layer-actions button {
       margin-top: 0;
     }
+
     .inline {
       display: flex;
       gap: 8px;
       align-items: center;
     }
+
     .inline label {
       margin: 0;
       flex: 1;
     }
+
+    .wiki-preview {
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      border: 1px solid var(--panel-border);
+      border-radius: 6px;
+      background: transparent;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+    }
+
+    .wiki-preview svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .wiki-preview .placeholder {
+      font-size: 11px;
+      color: var(--muted);
+      text-align: center;
+      padding: 12px;
+      line-height: 1.4;
+    }
   </style>
 </head>
+
 <body>
   <aside>
     <h1>SVG地図境界作成</h1>
@@ -252,6 +317,22 @@
     </div>
 
     <div class="group">
+      <h2>Wikipedia風出力</h2>
+      <label for="wikiSize">出力サイズ(px)</label>
+      <input id="wikiSize" type="number" min="240" step="40" value="480" />
+      <label class="inline"><input id="wikiAuto" type="checkbox" checked />選択で自動更新</label>
+      <label class="inline"><input id="wikiAnimate" type="checkbox" checked />回転アニメ</label>
+      <div id="wikiPreview" class="wiki-preview">
+        <div class="placeholder">多角形を抽出すると<br>Wikipedia風のプレビューを表示します。</div>
+      </div>
+      <div class="layer-actions">
+        <button id="wikiRenderBtn" class="secondary">出力を更新</button>
+        <button id="wikiDownloadBtn" class="secondary">SVGダウンロード</button>
+        <button id="wikiPngBtn" class="secondary">PNGダウンロード</button>
+      </div>
+    </div>
+
+    <div class="group">
       <h2>状態</h2>
       <div class="status" id="statusBox">SVGを待機中。</div>
     </div>
@@ -290,6 +371,17 @@
       zoom: 1,
       layerCheckboxes: new Map(),
       otherLayerElements: [],
+      polygonsById: new Map(),
+      wikiOutput: {
+        pointVectors: null,
+        polygonCenters: new Map(),
+        polygonSurface: new Map(),
+        coastVectors: null,
+        landVectorPaths: [],
+        currentCenter: { x: 1, y: 0, z: 0 },
+        animId: null,
+        lastSvg: "",
+      },
     };
     let buildGraphInProgress = false;
 
@@ -325,6 +417,13 @@
       statusBox: document.getElementById("statusBox"),
       typeLegend: document.getElementById("typeLegend"),
       typeLegendItems: document.getElementById("typeLegendItems"),
+      wikiSize: document.getElementById("wikiSize"),
+      wikiAuto: document.getElementById("wikiAuto"),
+      wikiAnimate: document.getElementById("wikiAnimate"),
+      wikiPreview: document.getElementById("wikiPreview"),
+      wikiRenderBtn: document.getElementById("wikiRenderBtn"),
+      wikiDownloadBtn: document.getElementById("wikiDownloadBtn"),
+      wikiPngBtn: document.getElementById("wikiPngBtn"),
       mapHost: document.getElementById("mapHost"),
       svgStack: document.getElementById("svgStack"),
       measureSvg: document.getElementById("measure"),
@@ -522,6 +621,827 @@
       const parts = viewBox.trim().split(/[\s,]+/).map(Number);
       if (parts.length !== 4 || parts.some((v) => !Number.isFinite(v))) return null;
       return { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };
+    }
+
+    function degToRad(deg) {
+      return (deg * Math.PI) / 180;
+    }
+
+    function normalizeVector(vec) {
+      const len = Math.hypot(vec.x, vec.y, vec.z);
+      if (!len) return { x: 1, y: 0, z: 0 };
+      return { x: vec.x / len, y: vec.y / len, z: vec.z / len };
+    }
+
+    function vectorToLonLat(vec) {
+      const norm = normalizeVector(vec);
+      return { lon: Math.atan2(norm.y, norm.x), lat: Math.asin(norm.z) };
+    }
+
+    function slerpVectors(a, b, t) {
+      const dot = Math.max(-1, Math.min(1, a.x * b.x + a.y * b.y + a.z * b.z));
+      const omega = Math.acos(dot);
+      if (omega < 1e-6) {
+        return normalizeVector({
+          x: a.x + (b.x - a.x) * t,
+          y: a.y + (b.y - a.y) * t,
+          z: a.z + (b.z - a.z) * t,
+        });
+      }
+      const sinOmega = Math.sin(omega);
+      const k0 = Math.sin((1 - t) * omega) / sinOmega;
+      const k1 = Math.sin(t * omega) / sinOmega;
+      return normalizeVector({
+        x: a.x * k0 + b.x * k1,
+        y: a.y * k0 + b.y * k1,
+        z: a.z * k0 + b.z * k1,
+      });
+    }
+
+    function getWikiSize() {
+      if (!el.wikiSize) return 480;
+      const value = Number(el.wikiSize.value);
+      if (!Number.isFinite(value)) return 480;
+      return Math.min(2000, Math.max(240, value));
+    }
+
+    const WIKI_COLORS = {
+      land: "#A1A1A1",
+      sea: "#FEFEFE",
+      seaRegion: "#E5E5E5",
+      seaSelected: "#AEC2AD",
+      landSelected: "#346733",
+      graticule: "#878787",
+      border: "#FEFEFE",
+      coast: "#636363",
+      outline: "#AAAAAA",
+      seaShadow: "#DDDDDD",
+    };
+
+    function mapPointToVector(point, vb) {
+      if (!point || !vb) return null;
+      const lon = ((point.x - vb.x) / vb.width) * 360 - 180;
+      const lat = 90 - ((point.y - vb.y) / vb.height) * 180;
+      const lonRad = degToRad(lon);
+      const latRad = degToRad(lat);
+      const cosLat = Math.cos(latRad);
+      return {
+        x: cosLat * Math.cos(lonRad),
+        y: cosLat * Math.sin(lonRad),
+        z: Math.sin(latRad),
+      };
+    }
+
+    function splitPathData(d) {
+      if (!d) return [];
+      return d.trim().split(/(?=[Mm])/).map((part) => part.trim()).filter(Boolean);
+    }
+
+    function applyTransform(point, element) {
+      if (!el.measureSvg) return { x: point.x, y: point.y };
+      const ctm = element.getCTM();
+      if (!ctm) return { x: point.x, y: point.y };
+      const svgPoint = el.measureSvg.createSVGPoint();
+      svgPoint.x = point.x;
+      svgPoint.y = point.y;
+      const out = svgPoint.matrixTransform(ctm);
+      return { x: out.x, y: out.y };
+    }
+
+    function samplePathElement(pathEl, step, pathDataOverride) {
+      if (!el.measureSvg) return [];
+      const clone = pathEl.cloneNode(true);
+      if (pathDataOverride) {
+        clone.setAttribute("d", pathDataOverride);
+      }
+      el.measureSvg.appendChild(clone);
+      const length = clone.getTotalLength();
+      const count = Math.max(2, Math.ceil(length / step));
+      const points = [];
+      for (let i = 0; i <= count; i += 1) {
+        const raw = clone.getPointAtLength((length * i) / count);
+        points.push(applyTransform(raw, clone));
+      }
+      el.measureSvg.removeChild(clone);
+      return points;
+    }
+
+    function samplePolylineElement(polyEl) {
+      if (!el.measureSvg) return [];
+      const clone = polyEl.cloneNode(true);
+      el.measureSvg.appendChild(clone);
+      const points = [];
+      const raw = clone.getAttribute("points") || "";
+      const parts = raw.trim().split(/[\s,]+/).filter(Boolean);
+      for (let i = 0; i < parts.length; i += 2) {
+        const x = Number(parts[i]);
+        const y = Number(parts[i + 1]);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        points.push(applyTransform({ x, y }, clone));
+      }
+      el.measureSvg.removeChild(clone);
+      return points;
+    }
+
+    function sampleRectElement(rectEl) {
+      if (!el.measureSvg) return [];
+      const clone = rectEl.cloneNode(true);
+      el.measureSvg.appendChild(clone);
+      const x = Number(clone.getAttribute("x")) || 0;
+      const y = Number(clone.getAttribute("y")) || 0;
+      const w = Number(clone.getAttribute("width")) || 0;
+      const h = Number(clone.getAttribute("height")) || 0;
+      const rawPoints = [
+        { x, y },
+        { x: x + w, y },
+        { x: x + w, y: y + h },
+        { x, y: y + h },
+      ];
+      const points = rawPoints.map((pt) => applyTransform(pt, clone));
+      el.measureSvg.removeChild(clone);
+      return points;
+    }
+
+    function cleanPathPoints(points) {
+      if (!points.length) return [];
+      const output = [];
+      const eps2 = 1e-10;
+      for (let i = 0; i < points.length; i += 1) {
+        const p = points[i];
+        if (!output.length || distanceSq(p, output[output.length - 1]) > eps2) {
+          output.push(p);
+        }
+      }
+      if (output.length > 2 && distanceSq(output[0], output[output.length - 1]) <= eps2) {
+        output.pop();
+      }
+      return output;
+    }
+
+    function getLandSampleStep() {
+      const base = el.sampleStep ? Number(el.sampleStep.value) : 1.2;
+      if (!Number.isFinite(base) || base <= 0) return 3;
+      return Math.max(2, base * 2.5);
+    }
+
+    function collectLandVectorPaths(step) {
+      if (!state.baseSvg) return [];
+      const vb = parseViewBox(state.viewBox);
+      if (!vb) return [];
+      const vectorPaths = [];
+
+      let targetLayer = null;
+      for (let i = 0; i < landLayerIds.length; i += 1) {
+        const candidate = state.baseSvg.getElementById(landLayerIds[i]);
+        if (candidate) {
+          targetLayer = candidate;
+          break;
+        }
+      }
+      if (!targetLayer) return [];
+
+      const elements = Array.from(targetLayer.querySelectorAll("path, polygon, polyline, rect"));
+      elements.forEach((item) => {
+        const tag = item.tagName.toLowerCase();
+        if (tag === "path") {
+          const d = item.getAttribute("d") || "";
+          const subpaths = splitPathData(d);
+          subpaths.forEach((subpath) => {
+            const points = cleanPathPoints(samplePathElement(item, step, subpath));
+            if (points.length < 3) return;
+            const vectors = points.map((pt) => mapPointToVector(pt, vb)).filter(Boolean);
+            if (vectors.length >= 3) {
+              vectorPaths.push(vectors);
+            }
+          });
+        } else if (tag === "polygon" || tag === "polyline") {
+          let points = samplePolylineElement(item);
+          if (points.length < 3) return;
+          points = points.concat(points[0]);
+          points = cleanPathPoints(points);
+          if (points.length < 3) return;
+          const vectors = points.map((pt) => mapPointToVector(pt, vb)).filter(Boolean);
+          if (vectors.length >= 3) {
+            vectorPaths.push(vectors);
+          }
+        } else if (tag === "rect") {
+          let points = sampleRectElement(item);
+          if (points.length < 3) return;
+          points = points.concat(points[0]);
+          points = cleanPathPoints(points);
+          if (points.length < 3) return;
+          const vectors = points.map((pt) => mapPointToVector(pt, vb)).filter(Boolean);
+          if (vectors.length >= 3) {
+            vectorPaths.push(vectors);
+          }
+        }
+      });
+
+      return vectorPaths;
+    }
+
+    function resetWikipediaOutput() {
+      if (state.wikiOutput && state.wikiOutput.animId) {
+        cancelAnimationFrame(state.wikiOutput.animId);
+      }
+      state.wikiOutput.pointVectors = null;
+      state.wikiOutput.polygonCenters = new Map();
+      state.wikiOutput.polygonSurface = new Map();
+      state.wikiOutput.coastVectors = null;
+      state.wikiOutput.landVectorPaths = [];
+      state.wikiOutput.currentCenter = { x: 1, y: 0, z: 0 };
+      state.wikiOutput.animId = null;
+      state.wikiOutput.lastSvg = "";
+      if (el.wikiPreview) {
+        el.wikiPreview.innerHTML = '<div class="placeholder">多角形を抽出すると<br>Wikipedia風のプレビューを表示します。</div>';
+      }
+    }
+
+    function buildWikipediaCache() {
+      if (!state.graph || !state.polygons.length) return false;
+      const vb = parseViewBox(state.viewBox);
+      if (!vb) return false;
+
+      const pointVectors = state.graph.points.map((pt) => mapPointToVector(pt, vb));
+      const polygonCenters = new Map();
+      state.polygons.forEach((poly) => {
+        let sx = 0;
+        let sy = 0;
+        let sz = 0;
+        poly.points.forEach((idx) => {
+          const v = pointVectors[idx];
+          if (!v) return;
+          sx += v.x;
+          sy += v.y;
+          sz += v.z;
+        });
+        const len = Math.hypot(sx, sy, sz);
+        const center = len ? { x: sx / len, y: sy / len, z: sz / len } : { x: 1, y: 0, z: 0 };
+        polygonCenters.set(String(poly.id), center);
+      });
+
+      const polygonSurface = new Map();
+      state.polygons.forEach((poly) => {
+        const type = state.polygonTypes.get(String(poly.id));
+        const surface = type === "共有する海" ? "sea" : "land";
+        polygonSurface.set(String(poly.id), surface);
+      });
+
+      let coastVectors = null;
+      if (state.rawCoastSegments && state.rawCoastSegments.length) {
+        coastVectors = state.rawCoastSegments
+          .map((seg) => ({ a: mapPointToVector(seg.a, vb), b: mapPointToVector(seg.b, vb) }))
+          .filter((seg) => seg.a && seg.b);
+      }
+
+      state.wikiOutput.pointVectors = pointVectors;
+      state.wikiOutput.polygonCenters = polygonCenters;
+      state.wikiOutput.polygonSurface = polygonSurface;
+      state.wikiOutput.coastVectors = coastVectors;
+      state.wikiOutput.landVectorPaths = collectLandVectorPaths(getLandSampleStep());
+      return true;
+    }
+
+    function computeSelectionCenterVector() {
+      if (!state.selectedPolygons.size || !state.wikiOutput.polygonCenters) return null;
+      let sx = 0;
+      let sy = 0;
+      let sz = 0;
+      let count = 0;
+      state.selectedPolygons.forEach((id) => {
+        const center = state.wikiOutput.polygonCenters.get(id);
+        if (!center) return;
+        sx += center.x;
+        sy += center.y;
+        sz += center.z;
+        count += 1;
+      });
+      if (!count) return null;
+      const len = Math.hypot(sx, sy, sz);
+      if (!len) return null;
+      return { x: sx / len, y: sy / len, z: sz / len };
+    }
+
+    function buildRotation(centerVec) {
+      const { lon, lat } = vectorToLonLat(centerVec);
+      return {
+        cosLon: Math.cos(lon),
+        sinLon: Math.sin(lon),
+        cosLat: Math.cos(lat),
+        sinLat: Math.sin(lat),
+      };
+    }
+
+    function rotateVector(vec, rotation) {
+      const x1 = rotation.cosLon * vec.x + rotation.sinLon * vec.y;
+      const y1 = -rotation.sinLon * vec.x + rotation.cosLon * vec.y;
+      const z1 = vec.z;
+      const x2 = rotation.sinLat * x1 - rotation.cosLat * z1;
+      const y2 = y1;
+      const z2 = rotation.cosLat * x1 + rotation.sinLat * z1;
+      return { x: x2, y: y2, z: z2 };
+    }
+
+    function projectRotated(vec) {
+      return { x: vec.y, y: vec.x };
+    }
+
+    function intersectRotatedIndices(aIdx, bIdx, rotX, rotY, rotZ) {
+      const zA = rotZ[aIdx];
+      const zB = rotZ[bIdx];
+      const denom = zA - zB;
+      if (Math.abs(denom) < 1e-9) return null;
+      const t = zA / denom;
+      const x = rotX[aIdx] + t * (rotX[bIdx] - rotX[aIdx]);
+      const y = rotY[aIdx] + t * (rotY[bIdx] - rotY[aIdx]);
+      const len = Math.hypot(x, y);
+      if (!len) return null;
+      const nx = x / len;
+      const ny = y / len;
+      return { x: ny, y: nx };
+    }
+
+    function intersectRotatedVectors(a, b) {
+      const denom = a.z - b.z;
+      if (Math.abs(denom) < 1e-9) return null;
+      const t = a.z / denom;
+      const x = a.x + t * (b.x - a.x);
+      const y = a.y + t * (b.y - a.y);
+      const len = Math.hypot(x, y);
+      if (!len) return null;
+      const nx = x / len;
+      const ny = y / len;
+      return { x: ny, y: nx };
+    }
+
+    function dedupePoints(points) {
+      const out = [];
+      const tol = 1e-6;
+      for (let i = 0; i < points.length; i += 1) {
+        const p = points[i];
+        if (!out.length) {
+          out.push(p);
+          continue;
+        }
+        const last = out[out.length - 1];
+        if (Math.abs(p.x - last.x) > tol || Math.abs(p.y - last.y) > tol) {
+          out.push(p);
+        }
+      }
+      if (out.length > 2) {
+        const first = out[0];
+        const last = out[out.length - 1];
+        if (Math.abs(first.x - last.x) < tol && Math.abs(first.y - last.y) < tol) {
+          out.pop();
+        }
+      }
+      return out;
+    }
+
+    function clipPolygonToHemisphere(indices, rotX, rotY, rotZ, projX, projY) {
+      const output = [];
+      if (!indices.length) return output;
+      let prev = indices[indices.length - 1];
+      let prevInside = rotZ[prev] >= 0;
+      for (let i = 0; i < indices.length; i += 1) {
+        const curr = indices[i];
+        const currInside = rotZ[curr] >= 0;
+        if (prevInside && currInside) {
+          output.push({ x: projX[curr], y: projY[curr] });
+        } else if (prevInside && !currInside) {
+          const hit = intersectRotatedIndices(prev, curr, rotX, rotY, rotZ);
+          if (hit) output.push(hit);
+        } else if (!prevInside && currInside) {
+          const hit = intersectRotatedIndices(prev, curr, rotX, rotY, rotZ);
+          if (hit) output.push(hit);
+          output.push({ x: projX[curr], y: projY[curr] });
+        }
+        prev = curr;
+        prevInside = currInside;
+      }
+      return dedupePoints(output);
+    }
+
+    function clipPolygonVectors(vectors, rotation) {
+      const output = [];
+      if (!vectors.length) return output;
+      let prev = rotateVector(vectors[vectors.length - 1], rotation);
+      let prevInside = prev.z >= 0;
+      for (let i = 0; i < vectors.length; i += 1) {
+        const curr = rotateVector(vectors[i], rotation);
+        const currInside = curr.z >= 0;
+        if (prevInside && currInside) {
+          output.push(projectRotated(curr));
+        } else if (prevInside && !currInside) {
+          const hit = intersectRotatedVectors(prev, curr);
+          if (hit) output.push(hit);
+        } else if (!prevInside && currInside) {
+          const hit = intersectRotatedVectors(prev, curr);
+          if (hit) output.push(hit);
+          output.push(projectRotated(curr));
+        }
+        prev = curr;
+        prevInside = currInside;
+      }
+      return dedupePoints(output);
+    }
+
+    function formatCoord(value) {
+      return value.toFixed(5);
+    }
+
+    function buildPathFromPoints(points) {
+      if (points.length < 3) return "";
+      let d = `M${formatCoord(points[0].x)} ${formatCoord(points[0].y)}`;
+      for (let i = 1; i < points.length; i += 1) {
+        d += ` L${formatCoord(points[i].x)} ${formatCoord(points[i].y)}`;
+      }
+      return `${d} Z`;
+    }
+
+    function buildEdgePath(edges, predicate, rotX, rotY, rotZ, projX, projY) {
+      const parts = [];
+      edges.forEach((edge) => {
+        if (!predicate(edge)) return;
+        const a = edge.a;
+        const b = edge.b;
+        const zA = rotZ[a];
+        const zB = rotZ[b];
+        if (zA >= 0 && zB >= 0) {
+          parts.push(`M${formatCoord(projX[a])} ${formatCoord(projY[a])} L${formatCoord(projX[b])} ${formatCoord(projY[b])}`);
+          return;
+        }
+        if (zA >= 0 || zB >= 0) {
+          const hit = intersectRotatedIndices(a, b, rotX, rotY, rotZ);
+          if (!hit) return;
+          if (zA >= 0) {
+            parts.push(`M${formatCoord(projX[a])} ${formatCoord(projY[a])} L${formatCoord(hit.x)} ${formatCoord(hit.y)}`);
+          } else {
+            parts.push(`M${formatCoord(hit.x)} ${formatCoord(hit.y)} L${formatCoord(projX[b])} ${formatCoord(projY[b])}`);
+          }
+        }
+      });
+      return parts.join(" ");
+    }
+
+    function buildSegmentPath(segments, rotation) {
+      const parts = [];
+      for (let i = 0; i < segments.length; i += 1) {
+        const seg = segments[i];
+        if (!seg || !seg.a || !seg.b) continue;
+        const a = rotateVector(seg.a, rotation);
+        const b = rotateVector(seg.b, rotation);
+        const zA = a.z;
+        const zB = b.z;
+        if (zA >= 0 && zB >= 0) {
+          const pa = projectRotated(a);
+          const pb = projectRotated(b);
+          parts.push(`M${formatCoord(pa.x)} ${formatCoord(pa.y)} L${formatCoord(pb.x)} ${formatCoord(pb.y)}`);
+          continue;
+        }
+        if (zA >= 0 || zB >= 0) {
+          const hit = intersectRotatedVectors(a, b);
+          if (!hit) continue;
+          if (zA >= 0) {
+            const pa = projectRotated(a);
+            parts.push(`M${formatCoord(pa.x)} ${formatCoord(pa.y)} L${formatCoord(hit.x)} ${formatCoord(hit.y)}`);
+          } else {
+            const pb = projectRotated(b);
+            parts.push(`M${formatCoord(hit.x)} ${formatCoord(hit.y)} L${formatCoord(pb.x)} ${formatCoord(pb.y)}`);
+          }
+        }
+      }
+      return parts.join(" ");
+    }
+
+    function buildLandPaths(rotation) {
+      const vectorPaths = state.wikiOutput.landVectorPaths || [];
+      const parts = [];
+      for (let i = 0; i < vectorPaths.length; i += 1) {
+        const clipped = clipPolygonVectors(vectorPaths[i], rotation);
+        if (clipped.length < 3) continue;
+        const d = buildPathFromPoints(clipped);
+        if (d) parts.push(d);
+      }
+      return parts;
+    }
+
+    function buildGraticulePath(rotation) {
+      const parts = [];
+      const step = 30;
+      const sample = 3;
+      for (let lon = -180; lon <= 180; lon += step) {
+        const line = [];
+        for (let lat = -90; lat <= 90; lat += sample) {
+          const lonRad = degToRad(lon);
+          const latRad = degToRad(lat);
+          const cosLat = Math.cos(latRad);
+          const vec = {
+            x: cosLat * Math.cos(lonRad),
+            y: cosLat * Math.sin(lonRad),
+            z: Math.sin(latRad),
+          };
+          line.push(rotateVector(vec, rotation));
+        }
+        parts.push(buildVisiblePolyline(line));
+      }
+      for (let lat = -60; lat <= 60; lat += step) {
+        const line = [];
+        for (let lon = -180; lon <= 180; lon += sample) {
+          const lonRad = degToRad(lon);
+          const latRad = degToRad(lat);
+          const cosLat = Math.cos(latRad);
+          const vec = {
+            x: cosLat * Math.cos(lonRad),
+            y: cosLat * Math.sin(lonRad),
+            z: Math.sin(latRad),
+          };
+          line.push(rotateVector(vec, rotation));
+        }
+        parts.push(buildVisiblePolyline(line));
+      }
+      return parts.filter(Boolean).join(" ");
+    }
+
+    function buildVisiblePolyline(rotatedPoints) {
+      if (!rotatedPoints.length) return "";
+      let d = "";
+      let active = false;
+      let prev = rotatedPoints[0];
+      for (let i = 1; i < rotatedPoints.length; i += 1) {
+        const curr = rotatedPoints[i];
+        const prevInside = prev.z >= 0;
+        const currInside = curr.z >= 0;
+        if (prevInside && currInside) {
+          const pp = projectRotated(prev);
+          const pc = projectRotated(curr);
+          if (!active) {
+            d += `M${formatCoord(pp.x)} ${formatCoord(pp.y)}`;
+            active = true;
+          }
+          d += ` L${formatCoord(pc.x)} ${formatCoord(pc.y)}`;
+        } else if (prevInside && !currInside) {
+          const hit = intersectRotatedVectors(prev, curr);
+          if (hit) {
+            const pp = projectRotated(prev);
+            if (!active) {
+              d += `M${formatCoord(pp.x)} ${formatCoord(pp.y)}`;
+            }
+            d += ` L${formatCoord(hit.x)} ${formatCoord(hit.y)}`;
+          }
+          active = false;
+        } else if (!prevInside && currInside) {
+          const hit = intersectRotatedVectors(prev, curr);
+          if (hit) {
+            const pc = projectRotated(curr);
+            d += `M${formatCoord(hit.x)} ${formatCoord(hit.y)} L${formatCoord(pc.x)} ${formatCoord(pc.y)}`;
+            active = true;
+          }
+        } else {
+          active = false;
+        }
+        prev = curr;
+      }
+      return d;
+    }
+
+    function buildWikipediaSvgMarkup(centerVec) {
+      if (!state.graph || !state.polygons.length || !state.wikiOutput.pointVectors) return "";
+      const rotation = buildRotation(centerVec);
+      const pointVectors = state.wikiOutput.pointVectors;
+      const count = pointVectors.length;
+      const rotX = new Float64Array(count);
+      const rotY = new Float64Array(count);
+      const rotZ = new Float64Array(count);
+      const projX = new Float64Array(count);
+      const projY = new Float64Array(count);
+
+      for (let i = 0; i < count; i += 1) {
+        const v = pointVectors[i];
+        const x1 = rotation.cosLon * v.x + rotation.sinLon * v.y;
+        const y1 = -rotation.sinLon * v.x + rotation.cosLon * v.y;
+        const z1 = v.z;
+        const x2 = rotation.sinLat * x1 - rotation.cosLat * z1;
+        const y2 = y1;
+        const z2 = rotation.cosLat * x1 + rotation.sinLat * z1;
+        rotX[i] = x2;
+        rotY[i] = y2;
+        rotZ[i] = z2;
+        projX[i] = y2;
+        projY[i] = x2;
+      }
+
+      const allPolygonPaths = [];
+      const selectedPolygonPaths = [];
+      state.polygons.forEach((poly) => {
+        const clipped = clipPolygonToHemisphere(poly.points, rotX, rotY, rotZ, projX, projY);
+        if (clipped.length < 3) return;
+        const d = buildPathFromPoints(clipped);
+        if (!d) return;
+        allPolygonPaths.push(d);
+        if (state.selectedPolygons.has(String(poly.id))) {
+          selectedPolygonPaths.push(d);
+        }
+      });
+
+      const landPaths = buildLandPaths(rotation);
+      const landPath = landPaths.join(" ");
+      const allPolygonsPath = allPolygonPaths.join(" ");
+      const selectedPath = selectedPolygonPaths.join(" ");
+      const hasLand = landPath.length > 0;
+      const hasRegions = allPolygonsPath.length > 0;
+      const hasSelection = selectedPath.length > 0;
+
+      const borderPath = state.graph
+        ? buildEdgePath(
+          state.graph.edges,
+          (edge) => edge.sources && edge.sources.has("border"),
+          rotX,
+          rotY,
+          rotZ,
+          projX,
+          projY,
+        )
+        : "";
+
+      const coastPath = state.wikiOutput.coastVectors && state.wikiOutput.coastVectors.length
+        ? buildSegmentPath(state.wikiOutput.coastVectors, rotation)
+        : state.graph
+          ? buildEdgePath(
+            state.graph.edges,
+            (edge) => edge.sources && edge.sources.has("coast"),
+            rotX,
+            rotY,
+            rotZ,
+            projX,
+            projY,
+          )
+          : "";
+
+      const graticulePath = buildGraticulePath(rotation);
+      const size = getWikiSize();
+
+      const svgParts = [
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="-1 -1 2 2">`,
+        "<defs>",
+        '<clipPath id="wikiSphereClip"><circle cx="0" cy="0" r="1" /></clipPath>',
+        '<linearGradient id="wikiSeaGradient" x1="0%" y1="0%" x2="100%" y2="100%">',
+        `<stop offset="0%" stop-color="${WIKI_COLORS.sea}" />`,
+        '<stop offset="70%" stop-color="#F5F5F5" />',
+        `<stop offset="100%" stop-color="${WIKI_COLORS.seaShadow}" />`,
+        "</linearGradient>",
+      ];
+
+      if (hasRegions) {
+        svgParts.push('<mask id="wikiRegionSeaMask" maskUnits="userSpaceOnUse" x="-1" y="-1" width="2" height="2">');
+        svgParts.push('<rect x="-1" y="-1" width="2" height="2" fill="black" />');
+        svgParts.push(`<path d="${allPolygonsPath}" fill="white" />`);
+        if (hasLand) {
+          svgParts.push(`<path d="${landPath}" fill="black" fill-rule="evenodd" />`);
+        }
+        svgParts.push("</mask>");
+      }
+
+      if (hasSelection) {
+        svgParts.push(`<clipPath id="wikiSelectedClip"><path d="${selectedPath}" /></clipPath>`);
+        svgParts.push('<mask id="wikiSelectedSeaMask" maskUnits="userSpaceOnUse" x="-1" y="-1" width="2" height="2">');
+        svgParts.push('<rect x="-1" y="-1" width="2" height="2" fill="black" />');
+        svgParts.push(`<path d="${selectedPath}" fill="white" />`);
+        if (hasLand) {
+          svgParts.push(`<path d="${landPath}" fill="black" fill-rule="evenodd" />`);
+        }
+        svgParts.push("</mask>");
+      }
+
+      svgParts.push("</defs>");
+      svgParts.push('<g clip-path="url(#wikiSphereClip)">');
+      svgParts.push('<circle cx="0" cy="0" r="1" fill="url(#wikiSeaGradient)" />');
+      if (hasRegions) {
+        svgParts.push(`<rect x="-1" y="-1" width="2" height="2" fill="${WIKI_COLORS.seaRegion}" mask="url(#wikiRegionSeaMask)" />`);
+      }
+      if (hasLand) {
+        svgParts.push(`<path d="${landPath}" fill="${WIKI_COLORS.land}" fill-rule="evenodd" />`);
+      }
+      if (hasSelection && hasLand) {
+        svgParts.push(`<g clip-path="url(#wikiSelectedClip)"><path d="${landPath}" fill="${WIKI_COLORS.landSelected}" fill-rule="evenodd" /></g>`);
+      }
+      if (hasSelection) {
+        svgParts.push(`<rect x="-1" y="-1" width="2" height="2" fill="${WIKI_COLORS.seaSelected}" mask="url(#wikiSelectedSeaMask)" />`);
+      }
+      if (graticulePath) {
+        svgParts.push(`<path d="${graticulePath}" fill="none" stroke="${WIKI_COLORS.graticule}" stroke-width="0.004" />`);
+      }
+      if (coastPath) {
+        svgParts.push(`<path d="${coastPath}" fill="none" stroke="${WIKI_COLORS.coast}" stroke-width="0.005" stroke-linecap="round" stroke-linejoin="round" />`);
+      }
+      if (borderPath) {
+        svgParts.push(`<path d="${borderPath}" fill="none" stroke="${WIKI_COLORS.border}" stroke-width="0.0045" stroke-linecap="round" stroke-linejoin="round" />`);
+      }
+
+      svgParts.push("</g>");
+      svgParts.push(`<circle cx="0" cy="0" r="1" fill="none" stroke="${WIKI_COLORS.outline}" stroke-width="0.012" />`);
+      svgParts.push("</svg>");
+      return svgParts.join("");
+    }
+
+    function renderWikipediaOutput(centerVec) {
+      if (!el.wikiPreview) return;
+      const svg = buildWikipediaSvgMarkup(centerVec);
+      if (!svg) {
+        resetWikipediaOutput();
+        return;
+      }
+      el.wikiPreview.innerHTML = svg;
+      state.wikiOutput.lastSvg = svg;
+    }
+
+    function scheduleWikipediaUpdate(force) {
+      if (!force && el.wikiAuto && !el.wikiAuto.checked) return;
+      if (!state.wikiOutput.pointVectors) return;
+      const target = computeSelectionCenterVector();
+      const next = target || state.wikiOutput.currentCenter || { x: 1, y: 0, z: 0 };
+      if (el.wikiAnimate && el.wikiAnimate.checked && target) {
+        animateWikipediaRotation(next);
+      } else {
+        state.wikiOutput.currentCenter = normalizeVector(next);
+        renderWikipediaOutput(state.wikiOutput.currentCenter);
+      }
+    }
+
+    function animateWikipediaRotation(targetVec) {
+      if (state.wikiOutput.animId) {
+        cancelAnimationFrame(state.wikiOutput.animId);
+      }
+      const start = normalizeVector(state.wikiOutput.currentCenter || { x: 1, y: 0, z: 0 });
+      const end = normalizeVector(targetVec);
+      const dot = start.x * end.x + start.y * end.y + start.z * end.z;
+      if (dot > 0.9999) {
+        state.wikiOutput.currentCenter = end;
+        renderWikipediaOutput(end);
+        return;
+      }
+      const duration = 500;
+      const startTime = performance.now();
+
+      const tick = (now) => {
+        const t = Math.min(1, (now - startTime) / duration);
+        const eased = 1 - Math.pow(1 - t, 3);
+        const vec = slerpVectors(start, end, eased);
+        state.wikiOutput.currentCenter = vec;
+        renderWikipediaOutput(vec);
+        if (t < 1) {
+          state.wikiOutput.animId = requestAnimationFrame(tick);
+        } else {
+          state.wikiOutput.animId = null;
+        }
+      };
+      state.wikiOutput.animId = requestAnimationFrame(tick);
+    }
+
+    function downloadWikipediaSvg() {
+      if (!state.wikiOutput.pointVectors) return;
+      const svg = buildWikipediaSvgMarkup(state.wikiOutput.currentCenter);
+      if (!svg) return;
+      const blob = new Blob([svg], { type: "image/svg+xml" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "wikipedia-output.svg";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    function downloadWikipediaPng() {
+      if (!state.wikiOutput.pointVectors) return;
+      const svg = buildWikipediaSvgMarkup(state.wikiOutput.currentCenter);
+      if (!svg) return;
+      const size = getWikiSize();
+      const blob = new Blob([svg], { type: "image/svg+xml" });
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, size, size);
+        ctx.drawImage(img, 0, 0, size, size);
+        canvas.toBlob((pngBlob) => {
+          if (!pngBlob) return;
+          const pngUrl = URL.createObjectURL(pngBlob);
+          const link = document.createElement("a");
+          link.href = pngUrl;
+          link.download = "wikipedia-output.png";
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          URL.revokeObjectURL(pngUrl);
+        }, "image/png");
+        URL.revokeObjectURL(url);
+      };
+      img.src = url;
     }
 
     function edgeKey(a, b) {
@@ -839,6 +1759,7 @@
       updatePolygonStrokes();
       updateSelectionOverlay();
       updateSelectionBoundary();
+      scheduleWikipediaUpdate(false);
     }
 
     function handleOverlayClick(event) {
@@ -973,6 +1894,7 @@
       state.baseSvg = baseSvg;
       state.overlaySvg = overlaySvg;
       resetZoom();
+      resetWikipediaOutput();
 
       buildLayerToggles();
       refreshLayerGroupControls();
@@ -1128,6 +2050,7 @@
       try {
         state.graph = null;
         state.polygons = [];
+        state.polygonsById = new Map();
         state.sharedSeaInfo = null;
         state.polygonEdgeIndex = null;
         state.polygonTypes.clear();
@@ -1135,6 +2058,7 @@
         state.borderCoastPointIndices = new Set();
         state.buildSnapTolerance = snap;
         clearOverlays();
+        resetWikipediaOutput();
         setBuildStatus(["準備中..."]);
         await DerleLogic.nextFrame();
 
@@ -1289,6 +2213,7 @@
           fill: randomFill(idx + 1),
         };
       });
+      state.polygonsById = new Map(state.polygons.map((poly) => [String(poly.id), poly]));
 
       clearOverlays();
       state.polygonEdgeIndex = null;
@@ -1321,9 +2246,11 @@
           coastInfo,
         );
       }
+      buildWikipediaCache();
       drawEdges();
       drawPolygons();
       drawPoints();
+      scheduleWikipediaUpdate(true);
 
       const outerCount = result.outerFaces.length;
       const outerMessage = outerCount === 0
@@ -1552,6 +2479,7 @@
     el.clearBtn.addEventListener("click", () => {
       clearOverlays();
       setStatus("重ね表示を消去しました。");
+      scheduleWikipediaUpdate(true);
     });
     el.toggleLandBtn.addEventListener("click", () => toggleLayerGroup(landLayerIds));
     el.toggleOtherBtn.addEventListener("click", toggleOtherLayers);
@@ -1560,6 +2488,18 @@
       updatePolygonFills();
       updateTypeLegendVisibility();
     });
+    if (el.wikiRenderBtn) {
+      el.wikiRenderBtn.addEventListener("click", () => scheduleWikipediaUpdate(true));
+    }
+    if (el.wikiDownloadBtn) {
+      el.wikiDownloadBtn.addEventListener("click", downloadWikipediaSvg);
+    }
+    if (el.wikiPngBtn) {
+      el.wikiPngBtn.addEventListener("click", downloadWikipediaPng);
+    }
+    if (el.wikiSize) {
+      el.wikiSize.addEventListener("change", () => scheduleWikipediaUpdate(true));
+    }
     if (el.polyOpacity) {
       el.polyOpacity.addEventListener("input", () => {
         updatePolygonOpacityLabel();
@@ -1579,6 +2519,8 @@
     buildTypeLegend();
     updateTypeLegendVisibility();
     updatePolygonOpacityLabel();
+    resetWikipediaOutput();
   </script>
 </body>
+
 </html>
