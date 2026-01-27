@@ -224,6 +224,9 @@
       <input id="sampleStep" type="number" min="0.2" step="0.2" value="1.2" />
       <label for="snapTolerance">吸着許容値（地図単位）</label>
       <input id="snapTolerance" type="number" min="0.05" step="0.05" value="1" />
+      <label for="dashSnapMultiplier">点線スナップ倍率</label>
+      <input id="dashSnapMultiplier" type="number" min="1" step="0.5" value="3" />
+      <div class="note">国境界の点線のみ、吸着許容値を倍率で拡大します。</div>
     </div>
 
     <div class="group">
@@ -267,6 +270,7 @@
     const state = {
       svgText: null,
       svgDoc: null,
+      dashedClasses: new Set(),
       baseSvg: null,
       overlaySvg: null,
       viewBox: null,
@@ -305,6 +309,7 @@
       layerToggles: document.getElementById("layerToggles"),
       sampleStep: document.getElementById("sampleStep"),
       snapTolerance: document.getElementById("snapTolerance"),
+      dashSnapMultiplier: document.getElementById("dashSnapMultiplier"),
       buildGraphBtn: document.getElementById("buildGraphBtn"),
       extractBtn: document.getElementById("extractBtn"),
       exportBtn: document.getElementById("exportBtn"),
@@ -867,6 +872,75 @@
       updateSelectionDisplay();
     }
 
+    function hasDashValue(value) {
+      if (value === null || value === undefined) return false;
+      const trimmed = String(value).trim().toLowerCase();
+      if (!trimmed || trimmed === "none") return false;
+      const numbers = trimmed.match(/-?\d*\.?\d+/g);
+      if (!numbers || numbers.length === 0) return false;
+      return numbers.some((num) => Math.abs(Number(num)) > 0);
+    }
+
+    function extractStyleValue(styleText, propertyName) {
+      if (!styleText) return "";
+      const regex = new RegExp(`${propertyName}\\s*:\\s*([^;]+)`, "i");
+      const match = String(styleText).match(regex);
+      return match ? match[1].trim() : "";
+    }
+
+    function collectDashedClasses(svgRoot) {
+      const dashed = new Set();
+      if (!svgRoot) return dashed;
+      const styles = Array.from(svgRoot.querySelectorAll("style"));
+      styles.forEach((styleEl) => {
+        const cssText = styleEl.textContent || "";
+        const ruleRegex = /([^{}]+)\{([^}]*)\}/g;
+        let match;
+        while ((match = ruleRegex.exec(cssText)) !== null) {
+          const selectors = match[1];
+          const body = match[2];
+          const dashValue = extractStyleValue(body, "stroke-dasharray");
+          if (!hasDashValue(dashValue)) continue;
+          selectors.split(",").forEach((selector) => {
+            const classMatches = selector.match(/\\.([_a-zA-Z0-9-]+)/g);
+            if (!classMatches) return;
+            classMatches.forEach((cls) => dashed.add(cls.slice(1)));
+          });
+        }
+      });
+      return dashed;
+    }
+
+    function hasDashedStyle(element) {
+      if (!element || !(element instanceof Element)) return false;
+      if (hasDashValue(element.getAttribute("stroke-dasharray"))) return true;
+      const inlineDash = extractStyleValue(element.getAttribute("style"), "stroke-dasharray");
+      if (hasDashValue(inlineDash)) return true;
+      if (state.dashedClasses && element.classList) {
+        for (const cls of element.classList) {
+          if (state.dashedClasses.has(cls)) return true;
+        }
+      }
+      return false;
+    }
+
+    function isDashedElement(element) {
+      if (!element || !(element instanceof Element)) return false;
+      let current = element;
+      while (current) {
+        if (hasDashedStyle(current)) return true;
+        current = current.parentElement;
+      }
+      return false;
+    }
+
+    function getDashSnapMultiplier() {
+      if (!el.dashSnapMultiplier) return 3;
+      const value = Number(el.dashSnapMultiplier.value);
+      if (!Number.isFinite(value) || value <= 0) return 3;
+      return value;
+    }
+
     function loadSvgText(text) {
       const parser = new DOMParser();
       const doc = parser.parseFromString(text, "image/svg+xml");
@@ -877,6 +951,7 @@
 
       state.svgText = text;
       state.svgDoc = doc;
+      state.dashedClasses = collectDashedClasses(svg);
       state.viewBox = svg.getAttribute("viewBox") || `0 0 ${svg.getAttribute("width")} ${svg.getAttribute("height")}`;
 
       el.svgStack.innerHTML = "";
@@ -1025,6 +1100,8 @@
       }
       const step = Number(el.sampleStep.value);
       const snap = Number(el.snapTolerance.value);
+      const dashSnapMultiplier = getDashSnapMultiplier();
+      const dashSnap = snap * dashSnapMultiplier;
       const minArea = 0;
 
       const borderLayer = getLayer("_国境界");
@@ -1073,9 +1150,18 @@
         let borderGraph = null;
 
         updateProgress("国境界を抽出中", 0, 0);
-        borderSegments = await DerleLogic.extractSegmentsFromLayer(borderLayer, step, "border", (done, total) => {
-          updateProgress("国境界を抽出中", done, total);
-        });
+        borderSegments = await DerleLogic.extractSegmentsFromLayer(
+          borderLayer,
+          step,
+          "border",
+          (done, total) => {
+            updateProgress("国境界を抽出中", done, total);
+          },
+          {
+            isDashed: isDashedElement,
+            dashSnap,
+          },
+        );
         segments = segments.concat(borderSegments);
 
         let coastLayer = null;
@@ -1100,7 +1186,8 @@
           updateProgress("海岸線レイヤーが見つかりません", 0, 0);
         }
 
-        const gridSize = Math.max(step * 2, snap * 4, 1);
+        const maxSnap = Math.max(snap, dashSnap);
+        const gridSize = Math.max(step * 2, maxSnap * 4, 1);
         segments = await DerleLogic.splitSegmentsAtIntersections(segments, gridSize, snap, (phase, done, total) => {
           const label = splitPhaseLabel[phase] || phase;
           updateProgress(`交差分割: ${label}`, done, total);

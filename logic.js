@@ -102,36 +102,44 @@
     return output;
   }
 
-  async function extractSegmentsFromLayer(layerEl, step, sourceTag, onProgress) {
+  async function extractSegmentsFromLayer(layerEl, step, sourceTag, onProgress, options) {
     const segments = [];
     const elements = Array.from(layerEl.querySelectorAll("path, polyline, polygon, line"));
     const total = elements.length;
     const yieldEvery = 20;
+    const isDashed = options && typeof options.isDashed === "function" ? options.isDashed : null;
+    const dashSnap = options && Number.isFinite(options.dashSnap) ? options.dashSnap : null;
 
-    const pushSegments = (points) => {
+    const pushSegments = (points, snapOverride) => {
       const cleaned = removeSequentialDuplicates(points, 1e-6);
       for (let i = 0; i < cleaned.length - 1; i += 1) {
-        segments.push({
+        const segment = {
           a: cleaned[i],
           b: cleaned[i + 1],
           source: sourceTag,
-        });
+        };
+        if (Number.isFinite(snapOverride)) {
+          segment.snap = snapOverride;
+        }
+        segments.push(segment);
       }
     };
 
     for (let index = 0; index < total; index += 1) {
       const item = elements[index];
       const tag = item.tagName.toLowerCase();
+      const dashed = isDashed ? isDashed(item) : false;
+      const snapOverride = dashed && Number.isFinite(dashSnap) ? dashSnap : null;
       if (tag === "path") {
         const d = item.getAttribute("d") || "";
         const subpaths = splitPathData(d);
         if (subpaths.length === 1) {
           const points = samplePathElement(item, step, subpaths[0]);
-          pushSegments(points);
+          pushSegments(points, snapOverride);
         } else if (subpaths.length > 1) {
           subpaths.forEach((subpath) => {
             const points = samplePathElement(item, step, subpath);
-            pushSegments(points);
+            pushSegments(points, snapOverride);
           });
         }
       } else if (tag === "polyline" || tag === "polygon") {
@@ -139,10 +147,10 @@
         if (tag === "polygon" && points.length > 2) {
           points.push(points[0]);
         }
-        pushSegments(points);
+        pushSegments(points, snapOverride);
       } else if (tag === "line") {
         const points = sampleLineElement(item);
-        pushSegments(points);
+        pushSegments(points, snapOverride);
       }
 
       if (onProgress && (index % yieldEvery === 0 || index === total - 1)) {
@@ -252,14 +260,13 @@
   }
 
   async function splitSegmentsAtIntersections(segments, gridSize, endpointSnap, onProgress) {
-    let snap = Number(endpointSnap) || 0;
+    let baseSnap = Number(endpointSnap) || 0;
     let progress = onProgress;
     if (typeof endpointSnap === "function") {
       progress = endpointSnap;
-      snap = 0;
+      baseSnap = 0;
     }
     const splitEps = 1e-6;
-    const pad = snap > 0 ? snap : 0;
     const segIntersections = new Map();
     const grid = new Map();
 
@@ -267,7 +274,13 @@
       return `${x},${y}`;
     }
 
+    function segmentSnap(seg) {
+      const segSnap = seg && Number.isFinite(seg.snap) ? seg.snap : baseSnap;
+      return segSnap > 0 ? segSnap : 0;
+    }
+
     function addToGrid(idx, seg) {
+      const pad = segmentSnap(seg);
       const minX = Math.min(seg.a.x, seg.b.x) - pad;
       const maxX = Math.max(seg.a.x, seg.b.x) + pad;
       const minY = Math.min(seg.a.y, seg.b.y) - pad;
@@ -290,10 +303,11 @@
       segIntersections.get(idx).push(t);
     }
 
-    function checkEndpointSnap(point, targetSeg, targetIdx) {
+    function checkEndpointSnap(point, targetSeg, targetIdx, snapDist) {
+      if (!(snapDist > 0)) return;
       const projection = pointSegmentProjection(point, targetSeg.a, targetSeg.b);
       if (!projection) return;
-      if (projection.distance <= snap) {
+      if (projection.distance <= snapDist) {
         addSplit(targetIdx, projection.t);
       }
     }
@@ -329,11 +343,15 @@
               addSplit(b, hit.t2);
             }
           }
-          if (snap > 0) {
-            checkEndpointSnap(segA.a, segB, b);
-            checkEndpointSnap(segA.b, segB, b);
-            checkEndpointSnap(segB.a, segA, a);
-            checkEndpointSnap(segB.b, segA, a);
+          const snapA = segmentSnap(segA);
+          const snapB = segmentSnap(segB);
+          if (snapA > 0) {
+            checkEndpointSnap(segA.a, segB, b, snapA);
+            checkEndpointSnap(segA.b, segB, b, snapA);
+          }
+          if (snapB > 0) {
+            checkEndpointSnap(segB.a, segA, a, snapB);
+            checkEndpointSnap(segB.b, segA, a, snapB);
           }
         }
       }
@@ -363,7 +381,11 @@
         const p0 = lerpPoint(seg.a, seg.b, t0);
         const p1 = lerpPoint(seg.a, seg.b, t1);
         if (distance(p0, p1) > splitEps) {
-          output.push({ a: p0, b: p1, source: seg.source });
+          const nextSeg = { a: p0, b: p1, source: seg.source };
+          if (Number.isFinite(seg.snap)) {
+            nextSeg.snap = seg.snap;
+          }
+          output.push(nextSeg);
         }
       }
       if (progress && (idx % splitYield === 0 || idx === segments.length - 1)) {
@@ -379,15 +401,23 @@
     const pointGrid = new Map();
     const points = [];
     const pointHits = [];
+    const pointSnaps = [];
     const edges = [];
     const edgeMap = new Map();
-    const cellSize = snap > 0 ? snap : 1e-6;
+    const baseSnap = Number(snap) || 0;
+    let maxSnap = baseSnap;
+    for (let i = 0; i < segments.length; i += 1) {
+      const segSnap = Number.isFinite(segments[i].snap) ? segments[i].snap : baseSnap;
+      if (segSnap > maxSnap) maxSnap = segSnap;
+    }
+    const cellSize = maxSnap > 0 ? maxSnap : 1e-6;
 
     function gridKey(x, y) {
       return `${x}:${y}`;
     }
 
-    function addPoint(pt) {
+    function addPoint(pt, snapHint) {
+      const snapDist = Number.isFinite(snapHint) ? snapHint : baseSnap;
       const cx = Math.floor(pt.x / cellSize);
       const cy = Math.floor(pt.y / cellSize);
       let bestIdx = null;
@@ -401,7 +431,8 @@
           for (let i = 0; i < candidates.length; i += 1) {
             const idx = candidates[i];
             const d = distance(pt, points[idx]);
-            if (d <= snap && d < bestDist) {
+            const allowed = Math.max(snapDist, pointSnaps[idx] || 0);
+            if (d <= allowed && d < bestDist) {
               bestDist = d;
               bestIdx = idx;
             }
@@ -413,6 +444,7 @@
         const idx = points.length;
         points.push({ x: pt.x, y: pt.y });
         pointHits.push(1);
+        pointSnaps.push(snapDist);
         const key = gridKey(cx, cy);
         if (!pointGrid.has(key)) pointGrid.set(key, []);
         pointGrid.get(key).push(idx);
@@ -423,14 +455,16 @@
       points[bestIdx].x = (points[bestIdx].x * pointHits[bestIdx] + pt.x) / hits;
       points[bestIdx].y = (points[bestIdx].y * pointHits[bestIdx] + pt.y) / hits;
       pointHits[bestIdx] = hits;
+      pointSnaps[bestIdx] = Math.max(pointSnaps[bestIdx] || 0, snapDist);
       return bestIdx;
     }
 
     const buildYield = 2000;
     for (let i = 0; i < segments.length; i += 1) {
       const seg = segments[i];
-      const a = addPoint(seg.a);
-      const b = addPoint(seg.b);
+      const segSnap = Number.isFinite(seg.snap) ? seg.snap : baseSnap;
+      const a = addPoint(seg.a, segSnap);
+      const b = addPoint(seg.b, segSnap);
       if (a === b) continue;
       const key = a < b ? `${a}-${b}` : `${b}-${a}`;
       let edge = edgeMap.get(key);
