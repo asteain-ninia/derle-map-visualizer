@@ -109,6 +109,24 @@
     const yieldEvery = 20;
     const isDashed = options && typeof options.isDashed === "function" ? options.isDashed : null;
     const dashSnap = options && Number.isFinite(options.dashSnap) ? options.dashSnap : null;
+    const groupedPaths = new Set();
+    const pathGroupMap = new Map();
+
+    {
+      const groupElements = Array.from(layerEl.querySelectorAll("g"));
+      groupElements.forEach((groupEl) => {
+        if (groupEl.closest && groupEl.closest("defs")) return;
+        const children = Array.from(groupEl.children || []);
+        if (!children.length) return;
+        const pathChildren = children.filter((child) => child.tagName && child.tagName.toLowerCase() === "path");
+        if (pathChildren.length < 2 || pathChildren.length !== children.length) return;
+        const info = {
+          paths: pathChildren,
+          processed: false,
+        };
+        pathChildren.forEach((child) => pathGroupMap.set(child, info));
+      });
+    }
 
     const pushSegments = (points, snapOverride) => {
       const cleaned = removeSequentialDuplicates(points, 1e-6);
@@ -125,9 +143,173 @@
       }
     };
 
+    const collectSinglePathPoints = (pathEl) => {
+      const d = pathEl.getAttribute("d") || "";
+      const subpaths = splitPathData(d);
+      if (subpaths.length !== 1) return null;
+      return samplePathElement(pathEl, step, subpaths[0]);
+    };
+
+    const pathLength = (points) => {
+      let totalLength = 0;
+      for (let i = 0; i < points.length - 1; i += 1) {
+        totalLength += distance(points[i], points[i + 1]);
+      }
+      return totalLength;
+    };
+
+    const buildGroupChain = (pathsPoints) => {
+      const count = pathsPoints.length;
+      if (!count) return null;
+      if (count === 1) return pathsPoints[0];
+
+      const oriented = pathsPoints.map((points) => {
+        const reversed = points.slice().reverse();
+        return {
+          forward: points,
+          reverse: reversed,
+          start: points[0],
+          end: points[points.length - 1],
+          rStart: reversed[0],
+          rEnd: reversed[reversed.length - 1],
+          length: pathLength(points),
+        };
+      });
+
+      const maxExact = 8;
+      if (count > maxExact) {
+        const used = new Array(count).fill(false);
+        let startIndex = 0;
+        let maxLength = -Infinity;
+        for (let i = 0; i < count; i += 1) {
+          if (oriented[i].length > maxLength) {
+            maxLength = oriented[i].length;
+            startIndex = i;
+          }
+        }
+        used[startIndex] = true;
+        const chain = [{ idx: startIndex, reverse: false }];
+        let currentEnd = oriented[startIndex].end;
+        while (chain.length < count) {
+          let best = null;
+          for (let i = 0; i < count; i += 1) {
+            if (used[i]) continue;
+            const forwardCost = distance(currentEnd, oriented[i].start);
+            if (!best || forwardCost < best.cost) {
+              best = { idx: i, reverse: false, cost: forwardCost };
+            }
+            const reverseCost = distance(currentEnd, oriented[i].rStart);
+            if (reverseCost < best.cost) {
+              best = { idx: i, reverse: true, cost: reverseCost };
+            }
+          }
+          if (!best) break;
+          used[best.idx] = true;
+          chain.push({ idx: best.idx, reverse: best.reverse });
+          currentEnd = best.reverse ? oriented[best.idx].rEnd : oriented[best.idx].end;
+        }
+
+        const combined = [];
+        chain.forEach((entry) => {
+          const points = entry.reverse ? oriented[entry.idx].reverse : oriented[entry.idx].forward;
+          combined.push(...points);
+        });
+        return combined;
+      }
+
+      const used = new Array(count).fill(false);
+      let bestCost = Infinity;
+      let bestChain = null;
+
+      const dfs = (lastEnd, chain, cost) => {
+        if (chain.length === count) {
+          if (cost < bestCost) {
+            bestCost = cost;
+            bestChain = chain.slice();
+          }
+          return;
+        }
+        for (let i = 0; i < count; i += 1) {
+          if (used[i]) continue;
+          const forwardCost = cost + distance(lastEnd, oriented[i].start);
+          if (forwardCost < bestCost) {
+            used[i] = true;
+            chain.push({ idx: i, reverse: false });
+            dfs(oriented[i].end, chain, forwardCost);
+            chain.pop();
+            used[i] = false;
+          }
+          const reverseCost = cost + distance(lastEnd, oriented[i].rStart);
+          if (reverseCost < bestCost) {
+            used[i] = true;
+            chain.push({ idx: i, reverse: true });
+            dfs(oriented[i].rEnd, chain, reverseCost);
+            chain.pop();
+            used[i] = false;
+          }
+        }
+      };
+
+      for (let i = 0; i < count; i += 1) {
+        used[i] = true;
+        dfs(oriented[i].end, [{ idx: i, reverse: false }], 0);
+        dfs(oriented[i].rEnd, [{ idx: i, reverse: true }], 0);
+        used[i] = false;
+      }
+
+      if (!bestChain) return null;
+      const combined = [];
+      bestChain.forEach((entry) => {
+        const points = entry.reverse ? oriented[entry.idx].reverse : oriented[entry.idx].forward;
+        combined.push(...points);
+      });
+      return combined;
+    };
+
+    const tryProcessPathGroup = (groupInfo) => {
+      if (!groupInfo || groupInfo.paths.length < 2) return false;
+      const pointsList = [];
+      for (let i = 0; i < groupInfo.paths.length; i += 1) {
+        const pathEl = groupInfo.paths[i];
+        const points = collectSinglePathPoints(pathEl);
+        if (!points || points.length < 2) return false;
+        pointsList.push(points);
+      }
+
+      const combined = buildGroupChain(pointsList);
+      if (!combined || combined.length < 2) return false;
+      // Dashed class names vary, so isDashed() stays the single source of truth here.
+      const snapOverride =
+        isDashed && Number.isFinite(dashSnap) && groupInfo.paths.some((pathEl) => isDashed(pathEl)) ? dashSnap : null;
+      pushSegments(combined, snapOverride);
+      return true;
+    };
+
     for (let index = 0; index < total; index += 1) {
       const item = elements[index];
       const tag = item.tagName.toLowerCase();
+      if (groupedPaths.has(item)) {
+        if (onProgress && (index % yieldEvery === 0 || index === total - 1)) {
+          onProgress(index + 1, total);
+          await nextFrame();
+        }
+        continue;
+      }
+      if (tag === "path") {
+        const groupInfo = pathGroupMap.get(item);
+        if (groupInfo && !groupInfo.processed) {
+          const grouped = tryProcessPathGroup(groupInfo);
+          groupInfo.processed = true;
+          if (grouped) {
+            groupInfo.paths.forEach((pathEl) => groupedPaths.add(pathEl));
+            if (onProgress && (index % yieldEvery === 0 || index === total - 1)) {
+              onProgress(index + 1, total);
+              await nextFrame();
+            }
+            continue;
+          }
+        }
+      }
       const dashed = isDashed ? isDashed(item) : false;
       const snapOverride = dashed && Number.isFinite(dashSnap) ? dashSnap : null;
       if (tag === "path") {
