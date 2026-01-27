@@ -319,7 +319,7 @@
     <div class="group">
       <h2>Wikipedia風出力</h2>
       <label for="wikiSize">出力サイズ(px)</label>
-      <input id="wikiSize" type="number" min="240" step="40" value="480" />
+      <input id="wikiSize" type="number" min="240" step="40" value="4800" />
       <label class="inline"><input id="wikiAuto" type="checkbox" checked />選択で自動更新</label>
       <label class="inline"><input id="wikiAnimate" type="checkbox" checked />回転アニメ</label>
       <div id="wikiPreview" class="wiki-preview">
@@ -659,9 +659,9 @@
     }
 
     function getWikiSize() {
-      if (!el.wikiSize) return 480;
+      if (!el.wikiSize) return 4800;
       const value = Number(el.wikiSize.value);
-      if (!Number.isFinite(value)) return 480;
+      if (!Number.isFinite(value)) return 4800;
       return Math.min(2000, Math.max(240, value));
     }
 
