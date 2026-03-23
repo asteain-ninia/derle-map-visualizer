@@ -896,15 +896,13 @@
         el.areaGroup.style.display = "none";
         return;
       }
+      const vb = parseViewBox(state.viewBox);
+      if (!vb) { el.areaGroup.style.display = "none"; return; }
 
-      let totalArea = 0;
       const selectedPolys = [];
       state.selectedPolygons.forEach((id) => {
         const poly = state.polygonsById.get(id);
-        if (poly) {
-          totalArea += Math.abs(poly.area);
-          selectedPolys.push(poly);
-        }
+        if (poly) selectedPolys.push(poly);
       });
       if (!selectedPolys.length) { el.areaGroup.style.display = "none"; return; }
 
@@ -920,30 +918,32 @@
       });
       const bboxW = maxX - minX;
       const bboxH = maxY - minY;
+      if (bboxW <= 0 || bboxH <= 0) { el.areaGroup.style.display = "none"; return; }
 
-      let landArea = totalArea;
-      if (bboxW > 0 && bboxH > 0 && state.landPaths2D.length) {
-        const maxDim = 800;
-        const scl = maxDim / Math.max(bboxW, bboxH);
-        const cw = Math.max(1, Math.ceil(bboxW * scl));
-        const ch = Math.max(1, Math.ceil(bboxH * scl));
+      const maxDim = 800;
+      const scl = maxDim / Math.max(bboxW, bboxH);
+      const cw = Math.max(1, Math.ceil(bboxW * scl));
+      const ch = Math.max(1, Math.ceil(bboxH * scl));
 
-        const c1 = document.createElement("canvas");
-        c1.width = cw; c1.height = ch;
-        const ctx1 = c1.getContext("2d");
-        ctx1.fillStyle = "white";
-        selectedPolys.forEach((poly) => {
-          ctx1.beginPath();
-          poly.points.forEach((idx, i) => {
-            const p = state.graph.points[idx];
-            const cx = (p.x - minX) * scl;
-            const cy = (p.y - minY) * scl;
-            if (i === 0) ctx1.moveTo(cx, cy); else ctx1.lineTo(cx, cy);
-          });
-          ctx1.closePath();
-          ctx1.fill();
+      const c1 = document.createElement("canvas");
+      c1.width = cw; c1.height = ch;
+      const ctx1 = c1.getContext("2d");
+      ctx1.fillStyle = "white";
+      selectedPolys.forEach((poly) => {
+        ctx1.beginPath();
+        poly.points.forEach((idx, i) => {
+          const p = state.graph.points[idx];
+          const cx = (p.x - minX) * scl;
+          const cy = (p.y - minY) * scl;
+          if (i === 0) ctx1.moveTo(cx, cy); else ctx1.lineTo(cx, cy);
         });
+        ctx1.closePath();
+        ctx1.fill();
+      });
 
+      const hasLand = state.landPaths2D.length > 0;
+      let d2 = null;
+      if (hasLand) {
         const c2 = document.createElement("canvas");
         c2.width = cw; c2.height = ch;
         const ctx2 = c2.getContext("2d");
@@ -958,18 +958,32 @@
           ctx2.closePath();
           ctx2.fill();
         });
+        d2 = ctx2.getImageData(0, 0, cw, ch).data;
+      }
 
-        const d1 = ctx1.getImageData(0, 0, cw, ch).data;
-        const d2 = ctx2.getImageData(0, 0, cw, ch).data;
-        let polyPx = 0, landPx = 0;
-        for (let i = 3; i < d1.length; i += 4) {
-          if (d1[i] > 0) {
-            polyPx++;
-            if (d2[i] > 0) landPx++;
+      const d1 = ctx1.getImageData(0, 0, cw, ch).data;
+      const R = vb.width / (2 * Math.PI);
+      const pixelSvgW = bboxW / cw;
+      const pixelSvgH = bboxH / ch;
+      const dLon = (pixelSvgW / vb.width) * 2 * Math.PI;
+      const dLat = (pixelSvgH / vb.height) * Math.PI;
+      const basePixelArea = R * R * dLon * dLat;
+
+      let totalArea = 0, landArea = 0;
+      for (let py = 0; py < ch; py++) {
+        const svgY = minY + (py + 0.5) / scl;
+        const lat = (Math.PI / 2) - ((svgY - vb.y) / vb.height) * Math.PI;
+        const rowArea = basePixelArea * Math.cos(lat);
+        const rowOffset = py * cw;
+        for (let px = 0; px < cw; px++) {
+          const idx = (rowOffset + px) * 4 + 3;
+          if (d1[idx] > 0) {
+            totalArea += rowArea;
+            if (hasLand && d2[idx] > 0) landArea += rowArea;
           }
         }
-        if (polyPx > 0) landArea = totalArea * (landPx / polyPx);
       }
+      if (!hasLand) landArea = totalArea;
 
       el.areaDisplay.textContent =
         `総面積: ${formatArea(totalArea)}\n陸域面積: ${formatArea(landArea)}`;
