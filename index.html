@@ -377,7 +377,6 @@
       layerCheckboxes: new Map(),
       otherLayerElements: [],
       polygonsById: new Map(),
-      landPaths2D: [],
       wikiOutput: {
         pointVectors: null,
         polygonCenters: new Map(),
@@ -621,7 +620,6 @@
       state.selectedPolygons.clear();
       state.selectionOverlay = null;
       state.selectionBoundary = null;
-      state.landPaths2D = [];
       if (el.areaGroup) el.areaGroup.style.display = "none";
     }
 
@@ -849,39 +847,55 @@
       return vectorPaths;
     }
 
-    function collectLandPaths2D(step) {
-      if (!state.baseSvg) return [];
-      const paths2D = [];
-      let targetLayer = null;
+    function getLandLayer() {
+      if (!state.baseSvg) return null;
       for (let i = 0; i < landLayerIds.length; i += 1) {
         const candidate = state.baseSvg.getElementById(landLayerIds[i]);
-        if (candidate) { targetLayer = candidate; break; }
+        if (candidate) return candidate;
       }
-      if (!targetLayer) return [];
-      const elements = Array.from(targetLayer.querySelectorAll("path, polygon, polyline, rect"));
+      return null;
+    }
+
+    function drawLandOnCanvas(ctx, minX, minY, scl) {
+      const layer = getLandLayer();
+      if (!layer) return false;
+      const elements = Array.from(layer.querySelectorAll("path, polygon, polyline, rect"));
+      if (!elements.length) return false;
+      ctx.fillStyle = "white";
       elements.forEach((item) => {
         const tag = item.tagName.toLowerCase();
+        let d = "";
         if (tag === "path") {
-          const d = item.getAttribute("d") || "";
-          splitPathData(d).forEach((subpath) => {
-            const points = cleanPathPoints(samplePathElement(item, step, subpath));
-            if (points.length >= 3) paths2D.push(points);
-          });
+          d = item.getAttribute("d") || "";
         } else if (tag === "polygon" || tag === "polyline") {
-          let points = samplePolylineElement(item);
-          if (points.length >= 3) {
-            points = cleanPathPoints(points.concat(points[0]));
-            if (points.length >= 3) paths2D.push(points);
-          }
+          const pts = (item.getAttribute("points") || "").trim();
+          if (pts) d = "M" + pts.split(/\s+/).join(" L") + " Z";
         } else if (tag === "rect") {
-          let points = sampleRectElement(item);
-          if (points.length >= 3) {
-            points = cleanPathPoints(points.concat(points[0]));
-            if (points.length >= 3) paths2D.push(points);
-          }
+          const rx = parseFloat(item.getAttribute("x")) || 0;
+          const ry = parseFloat(item.getAttribute("y")) || 0;
+          const rw = parseFloat(item.getAttribute("width")) || 0;
+          const rh = parseFloat(item.getAttribute("height")) || 0;
+          d = `M${rx} ${ry} H${rx + rw} V${ry + rh} H${rx} Z`;
         }
+        if (!d) return;
+        const clone = item.cloneNode(true);
+        el.measureSvg.appendChild(clone);
+        const ctm = clone.getCTM();
+        el.measureSvg.removeChild(clone);
+        ctx.save();
+        if (ctm) {
+          ctx.setTransform(
+            ctm.a * scl, ctm.b * scl,
+            ctm.c * scl, ctm.d * scl,
+            (ctm.e - minX) * scl, (ctm.f - minY) * scl
+          );
+        } else {
+          ctx.setTransform(scl, 0, 0, scl, -minX * scl, -minY * scl);
+        }
+        ctx.fill(new Path2D(d));
+        ctx.restore();
       });
-      return paths2D;
+      return true;
     }
 
     function formatArea(value) {
@@ -941,23 +955,12 @@
         ctx1.fill();
       });
 
-      const hasLand = state.landPaths2D.length > 0;
+      const c2 = document.createElement("canvas");
+      c2.width = cw; c2.height = ch;
+      const ctx2 = c2.getContext("2d");
+      const hasLand = drawLandOnCanvas(ctx2, minX, minY, scl);
       let d2 = null;
       if (hasLand) {
-        const c2 = document.createElement("canvas");
-        c2.width = cw; c2.height = ch;
-        const ctx2 = c2.getContext("2d");
-        ctx2.fillStyle = "white";
-        state.landPaths2D.forEach((path) => {
-          ctx2.beginPath();
-          path.forEach((p, i) => {
-            const cx = (p.x - minX) * scl;
-            const cy = (p.y - minY) * scl;
-            if (i === 0) ctx2.moveTo(cx, cy); else ctx2.lineTo(cx, cy);
-          });
-          ctx2.closePath();
-          ctx2.fill();
-        });
         d2 = ctx2.getImageData(0, 0, cw, ch).data;
       }
 
@@ -2436,7 +2439,6 @@
         );
       }
       buildWikipediaCache();
-      state.landPaths2D = collectLandPaths2D(getLandSampleStep());
       drawEdges();
       drawPolygons();
       drawPoints();
