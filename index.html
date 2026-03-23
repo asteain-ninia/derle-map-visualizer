@@ -375,7 +375,6 @@
       wikiOutput: {
         pointVectors: null,
         polygonCenters: new Map(),
-        polygonSurface: new Map(),
         coastVectors: null,
         landVectorPaths: [],
         currentCenter: { x: 1, y: 0, z: 0 },
@@ -846,7 +845,6 @@
       }
       state.wikiOutput.pointVectors = null;
       state.wikiOutput.polygonCenters = new Map();
-      state.wikiOutput.polygonSurface = new Map();
       state.wikiOutput.coastVectors = null;
       state.wikiOutput.landVectorPaths = [];
       state.wikiOutput.currentCenter = { x: 1, y: 0, z: 0 };
@@ -880,13 +878,6 @@
         polygonCenters.set(String(poly.id), center);
       });
 
-      const polygonSurface = new Map();
-      state.polygons.forEach((poly) => {
-        const type = state.polygonTypes.get(String(poly.id));
-        const surface = type === "共有する海" ? "sea" : "land";
-        polygonSurface.set(String(poly.id), surface);
-      });
-
       let coastVectors = null;
       if (state.rawCoastSegments && state.rawCoastSegments.length) {
         coastVectors = state.rawCoastSegments
@@ -896,7 +887,6 @@
 
       state.wikiOutput.pointVectors = pointVectors;
       state.wikiOutput.polygonCenters = polygonCenters;
-      state.wikiOutput.polygonSurface = polygonSurface;
       state.wikiOutput.coastVectors = coastVectors;
       state.wikiOutput.landVectorPaths = collectLandVectorPaths(getLandSampleStep());
       return true;
