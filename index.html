@@ -1756,6 +1756,7 @@
     }
 
     function updateSelectionDisplay() {
+      updatePolygonFills();
       updatePolygonStrokes();
       updateSelectionOverlay();
       updateSelectionBoundary();
@@ -2312,7 +2313,7 @@
           return `${i === 0 ? "M" : "L"}${p.x} ${p.y}`;
         }).join(" ") + " Z";
         path.setAttribute("d", d);
-        path.setAttribute("fill", getPolygonFill(poly));
+        path.setAttribute("fill", getPolygonDisplayFill(poly));
         path.setAttribute("fill-opacity", opacity);
         path.dataset.stroke = "#e8b86c";
         path.dataset.strokeWidth = "0.6";
@@ -2349,6 +2350,7 @@
       "島国",
       "不明",
     ];
+    const MULTI_SELECT_FILL = "#e8b86c";
 
     function buildTypeLegend() {
       if (!el.typeLegendItems) return;
@@ -2380,6 +2382,14 @@
       return poly.fill || randomFill(poly.id);
     }
 
+    function getPolygonDisplayFill(poly) {
+      const polyId = String(poly.id);
+      if (state.selectedPolygons.size > 1 && state.selectedPolygons.has(polyId)) {
+        return MULTI_SELECT_FILL;
+      }
+      return getPolygonFill(poly);
+    }
+
     function getPolygonOpacity() {
       if (!el.polyOpacity) return 0.25;
       const value = Number(el.polyOpacity.value);
@@ -2403,7 +2413,7 @@
       state.polygons.forEach((poly) => {
         const path = state.polygonPaths.get(String(poly.id));
         if (!path) return;
-        path.setAttribute("fill", getPolygonFill(poly));
+        path.setAttribute("fill", getPolygonDisplayFill(poly));
       });
     }
 
