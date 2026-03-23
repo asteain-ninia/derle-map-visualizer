@@ -998,9 +998,25 @@
       return out;
     }
 
+    function addHorizonArc(output, exitPt, entryPt) {
+      const exitAngle = Math.atan2(exitPt.y, exitPt.x);
+      const entryAngle = Math.atan2(entryPt.y, entryPt.x);
+      let diff = entryAngle - exitAngle;
+      if (diff > Math.PI) diff -= 2 * Math.PI;
+      if (diff < -Math.PI) diff += 2 * Math.PI;
+      if (Math.abs(diff) < 1e-6) return;
+      const steps = Math.max(2, Math.ceil(Math.abs(diff) / (Math.PI / 36)));
+      for (let s = 1; s < steps; s += 1) {
+        const angle = exitAngle + diff * (s / steps);
+        output.push({ x: Math.cos(angle), y: Math.sin(angle) });
+      }
+    }
+
     function clipPolygonToHemisphere(indices, rotX, rotY, rotZ, projX, projY) {
+      if (!indices.length) return [];
       const output = [];
-      if (!indices.length) return output;
+      let lastExit = null;
+      let firstEntry = null;
       let prev = indices[indices.length - 1];
       let prevInside = rotZ[prev] >= 0;
       for (let i = 0; i < indices.length; i += 1) {
@@ -1010,21 +1026,37 @@
           output.push({ x: projX[curr], y: projY[curr] });
         } else if (prevInside && !currInside) {
           const hit = intersectRotatedIndices(prev, curr, rotX, rotY, rotZ);
-          if (hit) output.push(hit);
+          if (hit) {
+            output.push(hit);
+            lastExit = hit;
+          }
         } else if (!prevInside && currInside) {
           const hit = intersectRotatedIndices(prev, curr, rotX, rotY, rotZ);
-          if (hit) output.push(hit);
+          if (hit) {
+            if (lastExit) {
+              addHorizonArc(output, lastExit, hit);
+              lastExit = null;
+            } else if (!firstEntry) {
+              firstEntry = hit;
+            }
+            output.push(hit);
+          }
           output.push({ x: projX[curr], y: projY[curr] });
         }
         prev = curr;
         prevInside = currInside;
       }
+      if (lastExit && firstEntry) {
+        addHorizonArc(output, lastExit, firstEntry);
+      }
       return dedupePoints(output);
     }
 
     function clipPolygonVectors(vectors, rotation) {
+      if (!vectors.length) return [];
       const output = [];
-      if (!vectors.length) return output;
+      let lastExit = null;
+      let firstEntry = null;
       let prev = rotateVector(vectors[vectors.length - 1], rotation);
       let prevInside = prev.z >= 0;
       for (let i = 0; i < vectors.length; i += 1) {
@@ -1034,14 +1066,28 @@
           output.push(projectRotated(curr));
         } else if (prevInside && !currInside) {
           const hit = intersectRotatedVectors(prev, curr);
-          if (hit) output.push(hit);
+          if (hit) {
+            output.push(hit);
+            lastExit = hit;
+          }
         } else if (!prevInside && currInside) {
           const hit = intersectRotatedVectors(prev, curr);
-          if (hit) output.push(hit);
+          if (hit) {
+            if (lastExit) {
+              addHorizonArc(output, lastExit, hit);
+              lastExit = null;
+            } else if (!firstEntry) {
+              firstEntry = hit;
+            }
+            output.push(hit);
+          }
           output.push(projectRotated(curr));
         }
         prev = curr;
         prevInside = currInside;
+      }
+      if (lastExit && firstEntry) {
+        addHorizonArc(output, lastExit, firstEntry);
       }
       return dedupePoints(output);
     }
