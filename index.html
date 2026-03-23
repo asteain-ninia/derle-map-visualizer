@@ -332,6 +332,11 @@
       </div>
     </div>
 
+    <div class="group" id="areaGroup" style="display:none">
+      <h2>面積</h2>
+      <div class="status" id="areaDisplay"></div>
+    </div>
+
     <div class="group">
       <h2>状態</h2>
       <div class="status" id="statusBox">SVGを待機中。</div>
@@ -372,6 +377,7 @@
       layerCheckboxes: new Map(),
       otherLayerElements: [],
       polygonsById: new Map(),
+      landPaths2D: [],
       wikiOutput: {
         pointVectors: null,
         polygonCenters: new Map(),
@@ -414,6 +420,8 @@
       showTypes: document.getElementById("showTypes"),
       showPoints: document.getElementById("showPoints"),
       statusBox: document.getElementById("statusBox"),
+      areaGroup: document.getElementById("areaGroup"),
+      areaDisplay: document.getElementById("areaDisplay"),
       typeLegend: document.getElementById("typeLegend"),
       typeLegendItems: document.getElementById("typeLegendItems"),
       wikiSize: document.getElementById("wikiSize"),
@@ -613,6 +621,8 @@
       state.selectedPolygons.clear();
       state.selectionOverlay = null;
       state.selectionBoundary = null;
+      state.landPaths2D = [];
+      if (el.areaGroup) el.areaGroup.style.display = "none";
     }
 
     function parseViewBox(viewBox) {
@@ -837,6 +847,133 @@
       });
 
       return vectorPaths;
+    }
+
+    function collectLandPaths2D(step) {
+      if (!state.baseSvg) return [];
+      const paths2D = [];
+      let targetLayer = null;
+      for (let i = 0; i < landLayerIds.length; i += 1) {
+        const candidate = state.baseSvg.getElementById(landLayerIds[i]);
+        if (candidate) { targetLayer = candidate; break; }
+      }
+      if (!targetLayer) return [];
+      const elements = Array.from(targetLayer.querySelectorAll("path, polygon, polyline, rect"));
+      elements.forEach((item) => {
+        const tag = item.tagName.toLowerCase();
+        if (tag === "path") {
+          const d = item.getAttribute("d") || "";
+          splitPathData(d).forEach((subpath) => {
+            const points = cleanPathPoints(samplePathElement(item, step, subpath));
+            if (points.length >= 3) paths2D.push(points);
+          });
+        } else if (tag === "polygon" || tag === "polyline") {
+          let points = samplePolylineElement(item);
+          if (points.length >= 3) {
+            points = cleanPathPoints(points.concat(points[0]));
+            if (points.length >= 3) paths2D.push(points);
+          }
+        } else if (tag === "rect") {
+          let points = sampleRectElement(item);
+          if (points.length >= 3) {
+            points = cleanPathPoints(points.concat(points[0]));
+            if (points.length >= 3) paths2D.push(points);
+          }
+        }
+      });
+      return paths2D;
+    }
+
+    function formatArea(value) {
+      if (value >= 1e6) return (value / 1e6).toFixed(2) + " M";
+      if (value >= 1e3) return (value / 1e3).toFixed(2) + " K";
+      return value.toFixed(2);
+    }
+
+    function computeAndDisplayArea() {
+      if (!el.areaGroup || !el.areaDisplay) return;
+      if (!state.selectedPolygons.size || !state.graph) {
+        el.areaGroup.style.display = "none";
+        return;
+      }
+
+      let totalArea = 0;
+      const selectedPolys = [];
+      state.selectedPolygons.forEach((id) => {
+        const poly = state.polygonsById.get(id);
+        if (poly) {
+          totalArea += Math.abs(poly.area);
+          selectedPolys.push(poly);
+        }
+      });
+      if (!selectedPolys.length) { el.areaGroup.style.display = "none"; return; }
+
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      selectedPolys.forEach((poly) => {
+        poly.points.forEach((idx) => {
+          const p = state.graph.points[idx];
+          if (p.x < minX) minX = p.x;
+          if (p.y < minY) minY = p.y;
+          if (p.x > maxX) maxX = p.x;
+          if (p.y > maxY) maxY = p.y;
+        });
+      });
+      const bboxW = maxX - minX;
+      const bboxH = maxY - minY;
+
+      let landArea = totalArea;
+      if (bboxW > 0 && bboxH > 0 && state.landPaths2D.length) {
+        const maxDim = 800;
+        const scl = maxDim / Math.max(bboxW, bboxH);
+        const cw = Math.max(1, Math.ceil(bboxW * scl));
+        const ch = Math.max(1, Math.ceil(bboxH * scl));
+
+        const c1 = document.createElement("canvas");
+        c1.width = cw; c1.height = ch;
+        const ctx1 = c1.getContext("2d");
+        ctx1.fillStyle = "white";
+        selectedPolys.forEach((poly) => {
+          ctx1.beginPath();
+          poly.points.forEach((idx, i) => {
+            const p = state.graph.points[idx];
+            const cx = (p.x - minX) * scl;
+            const cy = (p.y - minY) * scl;
+            if (i === 0) ctx1.moveTo(cx, cy); else ctx1.lineTo(cx, cy);
+          });
+          ctx1.closePath();
+          ctx1.fill();
+        });
+
+        const c2 = document.createElement("canvas");
+        c2.width = cw; c2.height = ch;
+        const ctx2 = c2.getContext("2d");
+        ctx2.fillStyle = "white";
+        state.landPaths2D.forEach((path) => {
+          ctx2.beginPath();
+          path.forEach((p, i) => {
+            const cx = (p.x - minX) * scl;
+            const cy = (p.y - minY) * scl;
+            if (i === 0) ctx2.moveTo(cx, cy); else ctx2.lineTo(cx, cy);
+          });
+          ctx2.closePath();
+          ctx2.fill();
+        });
+
+        const d1 = ctx1.getImageData(0, 0, cw, ch).data;
+        const d2 = ctx2.getImageData(0, 0, cw, ch).data;
+        let polyPx = 0, landPx = 0;
+        for (let i = 3; i < d1.length; i += 4) {
+          if (d1[i] > 0) {
+            polyPx++;
+            if (d2[i] > 0) landPx++;
+          }
+        }
+        if (polyPx > 0) landArea = totalArea * (landPx / polyPx);
+      }
+
+      el.areaDisplay.textContent =
+        `総面積: ${formatArea(totalArea)}\n陸域面積: ${formatArea(landArea)}`;
+      el.areaGroup.style.display = "";
     }
 
     function resetWikipediaOutput() {
@@ -1796,6 +1933,7 @@
       updatePolygonStrokes();
       updateSelectionOverlay();
       updateSelectionBoundary();
+      computeAndDisplayArea();
       scheduleWikipediaUpdate(false);
     }
 
@@ -2284,6 +2422,7 @@
         );
       }
       buildWikipediaCache();
+      state.landPaths2D = collectLandPaths2D(getLandSampleStep());
       drawEdges();
       drawPolygons();
       drawPoints();
