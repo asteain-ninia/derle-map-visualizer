@@ -662,7 +662,7 @@
       if (!el.wikiSize) return 4800;
       const value = Number(el.wikiSize.value);
       if (!Number.isFinite(value)) return 4800;
-      return Math.min(2000, Math.max(240, value));
+      return Math.min(9600, Math.max(240, value));
     }
 
     const WIKI_COLORS = {
