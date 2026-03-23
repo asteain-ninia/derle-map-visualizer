@@ -14,7 +14,7 @@
 
   function splitPathData(d) {
     if (!d) return [];
-    return d.trim().split(/(?=M)/).map((part) => part.trim()).filter(Boolean);
+    return d.trim().split(/(?=[Mm])/).map((part) => part.trim()).filter(Boolean);
   }
 
   function applyTransform(point, element) {
