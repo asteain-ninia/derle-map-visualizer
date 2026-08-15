@@ -2124,7 +2124,12 @@
       if (!window.Gimoza || typeof Gimoza.assignLabelsToPolygons !== "function") return empty;
       try {
         const labels = Gimoza.extractLabels(state.svgDoc);
-        const assigned = Gimoza.assignLabelsToPolygons(labels, state.polygons, state.graph.points, {});
+        // 陸海の判定を渡さないと、海へはみ出して置かれた国名が海の面に付いてしまう。
+        // 地形レイヤーを 1 度だけ焼いて画素で見るので、渡すぶんのコストはほぼ無い。
+        const isLand = typeof Gimoza.makeLandTester === "function"
+          ? Gimoza.makeLandTester(state.svgDoc)
+          : undefined;
+        const assigned = Gimoza.assignLabelsToPolygons(labels, state.polygons, state.graph.points, { isLand });
         const out = new Map();
         // 国名とそれ以外を分ける。国レベルの面には州名・地名・海名・山岳名まで
         // 全部載る（デーレ共和国で 55 件）ので、そのまま並べると読めない。

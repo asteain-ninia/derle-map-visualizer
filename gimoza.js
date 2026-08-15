@@ -665,15 +665,36 @@
   }
 
   /**
+   * ラベルとして扱うレイヤーの一覧。面 (ポリゴン) の名前になり得る 5 レイヤー。
+   * `_都市名` / `_河川名` は点・線への注記で面の名前ではないため既定に含めない
+   * (必要なら extractLabels(svgDoc, "_都市名") と明示指定すれば取れる)。
+   */
+  const LABEL_LAYER_IDS = ["_国名", "_州名", "_地名", "_海名", "_山岳名"];
+
+  /**
    * ラベルレイヤー (`_国名` / `_州名` / `_地名` / `_海名` / `_山岳名`) の `<text>` から
-   * 位置・回転角・フォントサイズ・文字列を取り出す。
+   * 位置・回転角・フォントサイズ・文字列を取り出す。layerId を省略すると
+   * LABEL_LAYER_IDS の全レイヤーを読む。各ラベルには由来の layer が付く。
    *
    * Node 版は生の SVG テキストを正規表現で読んでいたが、こちらは DOMParser で読んだ
    * ドキュメントを直接たどる (同じ属性を見ているので結果は同じ)。フォントサイズだけは
    * 切り離された文書で getComputedStyle が効かないため、`<style>` を正規表現で読む。
+   *
+   * segments には tspan ごとの配置 (テキストローカル座標のオフセット dx/dy と推定描画長
+   * len) が入る。Illustrator は改行だけでなく **1 行内の字間調整の区切りでも** テキストを
+   * 複数の tspan に割る (dy が変わらず dx だけ進む)。実データの国名 126 件中 53 件が
+   * 複数 tspan で、最初の tspan だけ見ると文字列の長さを 1/3 程度まで見誤っていた
+   * (例: ヤシュー・アレファクト = 3 tspan、実長 505px に対し旧見積り 150px)。
    */
   function extractLabels(svgDoc, layerId) {
     if (!svgDoc) return [];
+    if (layerId == null) {
+      const all = [];
+      for (const id of LABEL_LAYER_IDS) {
+        for (const l of extractLabels(svgDoc, id)) all.push(l);
+      }
+      return all;
+    }
     const layer =
       svgDoc.getElementById(layerId) || svgDoc.querySelector(`[data-name='${layerId.replace(/^_/, "")}']`);
     if (layer === null) return [];
@@ -689,32 +710,524 @@
       const cls = el.getAttribute("class");
       const name = (el.textContent || "").replace(/\s+/g, "").trim();
       if (name.length === 0) continue;
-      // 1 行目の文字数 (CJK は正方形グリフなので 1 文字 ≒ font-size として長さを見積る)
-      const tspan = el.getElementsByTagName("tspan")[0];
-      const firstLine = tspan ? (tspan.textContent || "").trim() : "";
       const fsRaw = cls ? fontSizes.get(cls.split(/\s+/)[0]) : undefined;
-      const fs = fsRaw ? Number(String(fsRaw).replace(/px\s*$/, "")) : NaN;
+      const fsNum = fsRaw ? Number(String(fsRaw).replace(/px\s*$/, "")) : NaN;
+      const fs = Number.isFinite(fsNum) && fsNum > 0 ? fsNum : 12;
+      // tspan ごとの配置。x/y はテキストローカル座標のオフセット (無指定は 0)。
+      const tspans = el.getElementsByTagName("tspan");
+      const segments = [];
+      if (tspans.length === 0) {
+        segments.push({ dx: 0, dy: 0, text: name });
+      } else {
+        for (let s = 0; s < tspans.length; s += 1) {
+          const text = (tspans[s].textContent || "").replace(/\s+/g, "");
+          if (text.length === 0) continue;
+          segments.push({
+            dx: Number(tspans[s].getAttribute("x")) || 0,
+            dy: Number(tspans[s].getAttribute("y")) || 0,
+            text,
+          });
+        }
+      }
+      // 各セグメントの描画長。同じ行に次のセグメントが続くなら、その開始位置までが
+      // 正確な長さ (字間調整も込みで Illustrator が計算済みの値)。行末セグメントは
+      // 文字数 × 0.85em で見積もる (Meiryo UI の CJK は漢字 ≒1em・かな ≒0.7em なので
+      // 中間を取る。行末の多少の過不足は面積判定にほとんど効かない)。
+      for (let s = 0; s < segments.length; s += 1) {
+        const cur = segments[s];
+        const next = segments[s + 1];
+        if (next !== undefined && next.dy === cur.dy && next.dx > cur.dx) {
+          cur.len = next.dx - cur.dx;
+        } else {
+          cur.len = cur.text.length * fs * 0.85;
+        }
+      }
+      const firstLine = tspans.length > 0 ? (tspans[0].textContent || "").trim() : "";
       labels.push({
+        layer: layerId,
         x: Number(tr[1]),
         y: Number(tr[2]),
         angleDeg: rot ? Number(rot[1]) : 0,
-        fontSize: Number.isFinite(fs) && fs > 0 ? fs : 12,
+        fontSize: fs,
         firstLineLen: firstLine.length || name.length,
         name,
+        segments,
       });
     }
     return labels;
   }
 
-  /** ラベル文字列の中央 (グリフ中央まで持ち上げた位置)。 */
+  /**
+   * ラベル文字列の中央 (グリフ中央まで持ち上げた位置)。segments があれば全セグメントを
+   * 長さで重み付けした重心 (字間区切り・複数行も正しく中央になる)。無い旧形式の
+   * ラベルは 1 行目基準の従来式に落ちる。
+   */
   function labelCenter(label) {
     const rad = (label.angleDeg * Math.PI) / 180;
-    const len = label.firstLineLen * label.fontSize;
+    const cosA = Math.cos(rad);
+    const sinA = Math.sin(rad);
     const lift = label.fontSize * 0.35;
-    return [
-      label.x + (Math.cos(rad) * len) / 2 + Math.sin(rad) * lift,
-      label.y + (Math.sin(rad) * len) / 2 - Math.cos(rad) * lift,
-    ];
+    // テキストローカル座標での中央 (u = 文字送り方向, v = 行送り方向で下が正)
+    let u = (label.firstLineLen * label.fontSize) / 2;
+    let v = -lift;
+    if (Array.isArray(label.segments) && label.segments.length > 0) {
+      let su = 0;
+      let sv = 0;
+      let sw = 0;
+      for (const s of label.segments) {
+        const w = s.len > 0 ? s.len : 1;
+        su += (s.dx + (s.len || 0) / 2) * w;
+        sv += (s.dy - lift) * w;
+        sw += w;
+      }
+      u = su / sw;
+      v = sv / sw;
+    }
+    return [label.x + u * cosA - v * sinA, label.y + u * sinA + v * cosA];
+  }
+
+  /**
+   * ラベルの占有領域 (セグメントごとの向き付き矩形) を格子でサンプルした点列と、
+   * 占有領域の面積 (箱面積) を返す。判定用なので描画品位は要らない:
+   *   - 行方向はフォントサイズの 0.4 倍刻み (1 文字あたり 2〜3 点)
+   *   - 行と直交する方向はグリフ帯 (ベースライン上 0.16〜0.68em) に 3 列
+   * 微小国のラベルはフォントも微小なので、刻みが fs に比例していれば
+   * 微小面にも必ず数点は落ちる (面の大きさに対する相対解像度が一定)。
+   */
+  function labelFootprint(label) {
+    const rad = (label.angleDeg * Math.PI) / 180;
+    const cosA = Math.cos(rad);
+    const sinA = Math.sin(rad);
+    const fs = label.fontSize;
+    const segs =
+      Array.isArray(label.segments) && label.segments.length > 0
+        ? label.segments
+        : [{ dx: 0, dy: 0, len: (label.firstLineLen || label.name.length) * fs }];
+    const LIFTS = [0.16, 0.42, 0.68];
+    const step = Math.max(fs * 0.4, 0.2);
+    const toGlobal = (u, v) => [label.x + u * cosA - v * sinA, label.y + u * sinA + v * cosA];
+    const samples = [];
+    const boxes = []; // セグメントごとの向き付き矩形 (グローバル座標の 4 隅)
+    let boxArea = 0;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const s of segs) {
+      const len = s.len > 0 ? s.len : (s.text ? s.text.length : 1) * fs * 0.85;
+      boxArea += len * fs;
+      const n = Math.max(2, Math.ceil(len / step) + 1);
+      for (let k = 0; k < n; k += 1) {
+        const u = s.dx + (len * k) / (n - 1);
+        for (const lift of LIFTS) {
+          const v = s.dy - lift * fs;
+          samples.push(toGlobal(u, v));
+        }
+      }
+      // グリフ帯の矩形。CJK のインクはベースラインの少し下 (約 0.15em) まで届くので
+      // 帯は [dy−0.85em, dy+0.15em] の 1em 幅で取る (微小面の被覆率判定に効く —
+      // 実データの面積 6.8 の飛び国はベースラインの下にはみ出して置かれていた)。
+      const corners = [
+        toGlobal(s.dx, s.dy - fs * 0.85),
+        toGlobal(s.dx + len, s.dy - fs * 0.85),
+        toGlobal(s.dx + len, s.dy + fs * 0.15),
+        toGlobal(s.dx, s.dy + fs * 0.15),
+      ];
+      boxes.push(corners);
+      for (const [x, y] of corners) {
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+    }
+    return { samples, boxes, boxArea, bbox: { minX, minY, maxX, maxY } };
+  }
+
+  /**
+   * 多角形 (座標列) を凸多角形 (ラベルのセグメント矩形) で切り抜いた面積の合計。
+   * Sutherland–Hodgman 法。微小面の被覆率はサンプル点の数え上げでは粗すぎて
+   * 見誤る (実データ: 面積 6.8 の飛び国にサンプルが 1 点しか落ちない) ため、
+   * ここだけ正確な幾何で計算する。対象は微小面に限るので計算量は問題にならない。
+   */
+  function overlapAreaWithBoxes(ringPts, boxes) {
+    let sum = 0;
+    for (const box of boxes) {
+      let poly = ringPts;
+      for (let e = 0; e < box.length && poly.length > 2; e += 1) {
+        const [ax, ay] = box[e];
+        const [bx, by] = box[(e + 1) % box.length];
+        // 辺 (a→b) の内側 (時計回りの矩形なので右手側) に切り詰める
+        const inside = (p) => (bx - ax) * (p[1] - ay) - (by - ay) * (p[0] - ax) >= 0;
+        const clipped = [];
+        for (let k = 0; k < poly.length; k += 1) {
+          const cur = poly[k];
+          const prev = poly[(k + poly.length - 1) % poly.length];
+          const curIn = inside(cur);
+          const prevIn = inside(prev);
+          if (curIn !== prevIn) {
+            // 辺と直線の交点
+            const dx = cur[0] - prev[0];
+            const dy = cur[1] - prev[1];
+            const denom = (bx - ax) * dy - (by - ay) * dx;
+            if (denom !== 0) {
+              // f(p) = (b-a)×(p-a)。f(prev) + t·(f(cur)-f(prev)) = 0 を解く
+              const t = ((bx - ax) * (ay - prev[1]) - (by - ay) * (ax - prev[0])) / denom;
+              clipped.push([prev[0] + dx * t, prev[1] + dy * t]);
+            }
+          }
+          if (curIn) clipped.push(cur);
+        }
+        poly = clipped;
+      }
+      let a = 0;
+      for (let k = 0; k < poly.length; k += 1) {
+        const p = poly[k];
+        const q = poly[(k + 1) % poly.length];
+        a += p[0] * q[1] - q[0] * p[1];
+      }
+      sum += Math.abs(a) / 2;
+    }
+    return sum;
+  }
+
+  // --- 4b. ラベル → 面の割当 ---------------------------------------------------
+  //
+  // 「この SVG のラベル文字は、どの面 (ポリゴン) の名前か」の判定。
+  //
+  // 旧実装は「文字列に沿って点を打ち、入った面の先着順 (+ 面積 100 未満の面を最優先)」
+  // だったが、実データで次の理由からラベルが隣の面に付く誤りが出ていた:
+  //   - 字間区切り (tspan) の最初の 1 つ分しか文字列の長さを見ておらず、
+  //     ラベルの実際の広がりを大幅に見誤る (最大で実長の 1/3 まで縮んで見えていた)
+  //   - 先着順なので、文字列の大半が載る面ではなく、中央の 1 点がたまたま入った面が勝つ
+  //     (中央 1 点が海に落ちた国名 30 件超が海の面に付いていた)
+  //   - 「面積 100 未満」という絶対閾値の微小面優先が、大国の大きなラベルが偶々
+  //     微小国の上を横切った場合にも効いてしまう (デーレ共和国 → 面積 5.4 の微小面)
+  //
+  // 新しい判定 (ユーザー案「ラベルの占める面積が最大の面」を基本に据える):
+  //   1. ラベルの占有領域 = セグメントごとの向き付き矩形 (labelFootprint)。格子状に
+  //      サンプルし、各サンプル点は「それを含む最小面積の面」に帰す。飛び地・入れ子
+  //      (海の面の中に島の面が幾何的に重なって存在する) はこの「最小の面」で正しく解ける。
+  //   2. 各サンプル点の陸/海を options.isLand (地形レイヤー由来 — makeLandTester) で
+  //      判定し、陸の名前 (国名・州名・地名・山岳名) は陸に落ちたサンプルだけ、
+  //      海の名前 (海名) は海に落ちたサンプルだけを数える。こうすると
+  //        - 国名が海へはみ出しても、海の面は候補にならない
+  //        - 領海込みの国の面 (陸と海の両方を含む) も、陸の部分に載った分だけで競える
+  //      ことになる。面の「種別」(classifyPolygons の結果) は使わない — 州レベルでは
+  //      沿岸国も「共有する海」型になるなど、地物の陸海と一致しないことを実データで確認した。
+  //   3. 基本は占有サンプル数 (= ラベルの載っている面積) が最大の面。
+  //   4. 例外 (微小面の救済): ラベルがその面を大きく覆い (被覆率 ≥ 0.35)、かつラベルの
+  //      大きさが面と釣り合う (箱面積 ≤ 25 × 面面積) なら、占有量に関係なくその面を採る。
+  //      微小国の上に書かれた名前は、占有面積の比較では必ず周囲の大国に負けるため。
+  //      釣り合い条件が無いと逆に、大国の大きなラベルが経路上の微小国を丸呑みして
+  //      奪ってしまう (例: アクセルのラベルと、その下に密集する不明国群)。
+  //   5. どのサンプルも期待種別の面に載らないラベル (引き出し線のような洋上配置) は、
+  //      「陸を含む面」のうち最寄りのものへ (既定は国名レイヤーだけ。国名は必ずどこかの
+  //      国の名前だが、海名は外洋 = どの面でもない場所に浮いたままが正しいことがある)。
+  //   6. options.manualAssign (ユーザー裁定) は常に最優先。
+  //
+  // 他に検討して落とした案:
+  //   - 純粋な重なり面積最大 (ユーザー案そのまま): 微小国が常に負ける (上記 4 の理由)。
+  //   - IoU (重なり ÷ 和集合): 面の大小に依存しすぎ、大きな正しい国より少しだけ重なった
+  //     小さな隣国が勝つ配置が作れるため。
+  //   - ラベル中央の 1 点判定: 細長い国・回転ラベル・はみ出し配置で不安定 (現状の誤りの主因)。
+  //   - 面種別 (classifyPolygons) での陸海フィルタ: 実データで種別が陸海と一致せず
+  //     (沿岸国が「共有する海」型など)、正しい面を弾いてしまった。地形レイヤー由来の
+  //     陸判定 (makeLandTester) に置き換えた。
+
+  /** レイヤーごとに期待する中身 (assignLabelsToPolygons の既定)。 */
+  const DEFAULT_EXPECTED_KIND = {
+    _国名: "land",
+    _州名: "land",
+    _地名: "land",
+    _山岳名: "land",
+    _海名: "sea",
+  };
+
+  /**
+   * 地形レイヤー (`_第一分高面` = 陸全体のシルエット) から「点 (SVG 座標) が陸か」を
+   * 判定する関数を作る。ラベル割当の陸海判定に使う。
+   *
+   * 実装はレイヤー全体を 1 度だけキャンバスへ塗り、ピクセルを引くだけにした
+   * (Path2D の isPointInPath を毎回呼ぶと 547 パス × 数万サンプルで遅い)。
+   * 解像度は SVG ユーザー座標で 1px — 海岸線ぎわ ±1px の誤差は面積の多数決に効かない。
+   * ブラウザ専用 (canvas が無い環境では null を返し、呼び出し側は陸海判定なしで続行)。
+   */
+  function makeLandTester(svgDoc) {
+    if (typeof document === "undefined" || typeof Path2D !== "function") return null;
+    const layer =
+      svgDoc.getElementById("_第一分高面") || svgDoc.querySelector("[data-name='第一分高面']");
+    if (layer === null) return null;
+    const svg = svgDoc.documentElement;
+    const vb = (svg.getAttribute("viewBox") || "").trim().split(/[\s,]+/).map(Number);
+    if (vb.length !== 4 || !vb.every(Number.isFinite)) return null;
+    const [vx, vy, vw, vh] = vb;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.ceil(vw);
+    canvas.height = Math.ceil(vh);
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (ctx === null) return null;
+    ctx.translate(-vx, -vy);
+    ctx.fillStyle = "#fff";
+    const nodes = layer.querySelectorAll("path, polygon, rect");
+    for (let n = 0; n < nodes.length; n += 1) {
+      const p = nodes[n];
+      const tag = p.tagName.toLowerCase();
+      let d = null;
+      if (tag === "path") {
+        d = p.getAttribute("d");
+      } else if (tag === "rect") {
+        const x = Number(p.getAttribute("x") ?? 0);
+        const y = Number(p.getAttribute("y") ?? 0);
+        const w = Number(p.getAttribute("width") ?? 0);
+        const h = Number(p.getAttribute("height") ?? 0);
+        d = `M${x},${y}H${x + w}V${y + h}H${x}Z`;
+      } else if (tag === "polygon") {
+        const ptsAttr = (p.getAttribute("points") ?? "").trim();
+        if (ptsAttr.length > 0) d = `M${ptsAttr}Z`;
+      }
+      if (d === null || d.length === 0) continue;
+      ctx.fill(new Path2D(d));
+    }
+    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = img.data;
+    const W = canvas.width;
+    const H = canvas.height;
+    return (x, y) => {
+      const px = Math.round(x - vx);
+      const py = Math.round(y - vy);
+      if (px < 0 || px >= W || py < 0 || py >= H) return false;
+      return data[(py * W + px) * 4 + 3] > 0; // アルファ > 0 = 塗られた = 陸
+    };
+  }
+
+  /**
+   * ラベル文字を面 (ポリゴン) へ割り当てる。
+   *
+   * @param labels   Gimoza.extractLabels(svgDoc) の戻り値 (そのまま渡せる)
+   * @param polygons state.polygons ({id, area, points: 点インデックス列} の配列)。
+   *                 内部形式 ({ring}) や area 無しでも受ける
+   * @param points   state.graph.points ({x, y} の配列)
+   * @param options  {
+   *   layers:        処理するレイヤー id の配列 (省略時は labels 全部),
+   *   isLand:        (x, y) => bool — 陸判定 (makeLandTester(svgDoc) を渡す)。
+   *                  省略時は陸海で候補を絞らない (幾何だけで判定),
+   *   expectedKind:  レイヤー id → "land" | "sea" (省略時は DEFAULT_EXPECTED_KIND),
+   *   fallbackNearestLayers: 最寄りフォールバックを掛けるレイヤー (省略時 ["_国名"]),
+   *   manualAssign:  { ラベル文言: [x, y] } — その座標を含む面へ強制割当 (ユーザー裁定),
+   *   log:           進捗ログ関数,
+   * }
+   * @returns {
+   *   byPolygon: Map<String(面id), string[]>  — 面に載っているラベル文字 (無い面はキー無し),
+   *   byLabel:   [{text, layer, polygonId, polygonIndex, method, score}] — ラベルごとの結果。
+   *              どの面にも載らなければ polygonId は null。method は
+   *              overlap (占有最大) / micro (微小面の救済) / nearest (最寄り) / manual (裁定)
+   * }
+   */
+  function assignLabelsToPolygons(labels, polygons, points, options) {
+    const opts = options || {};
+    const log = typeof opts.log === "function" ? opts.log : () => {};
+    // 面の前処理: リング・絶対面積・bbox (points / ring どちらのキー名でも受ける)
+    const polys = polygons.map((p) => {
+      const ring = p.points ?? p.ring;
+      const area = p.area != null ? Math.abs(p.area) : Math.abs(ringSignedArea(ring, points));
+      return { id: p.id, ring, area, bbox: bboxOfRing(ring, points) };
+    });
+    const isLand = typeof opts.isLand === "function" ? opts.isLand : null;
+    const expected = opts.expectedKind ?? DEFAULT_EXPECTED_KIND;
+    const fallbackLayers = new Set(opts.fallbackNearestLayers ?? ["_国名"]);
+    const layerFilter = opts.layers == null ? null : new Set(opts.layers);
+    const manual = opts.manualAssign || {};
+    // 微小面の救済に要る被覆率 (正確な切り抜き面積比)。1/2 だと、グリフ半個ぶん
+    // ずれて置かれた飛び国ラベル (実データ: 被覆 0.475) を取りこぼすので 0.35。
+    const COVER_MIN = opts.microCoverMin ?? 0.35;
+    // ラベル箱面積 ÷ 面面積の釣り合い上限。実データの飛び国 (デルレイス帝国) は 7.8 倍、
+    // 逆に「大国の大ラベルが経路上の小島を丸呑みして奪う」誤り (統一ウェツェリオ 20 倍、
+    // 南ラティオ部族領諸国 23 倍、ルウェスタ小大陸 13 倍) は全て 10 倍超だったので 10。
+    const SIZE_RATIO_MAX = opts.microSizeRatioMax ?? 10;
+
+    // 点を含む面のうち最小面積のもの (飛び地・入れ子はこれで解ける)
+    const smallestContaining = (x, y) => {
+      let best = -1;
+      for (let i = 0; i < polys.length; i += 1) {
+        const bb = polys[i].bbox;
+        if (x < bb.minX || x > bb.maxX || y < bb.minY || y > bb.maxY) continue;
+        if (!pointInRing(x, y, polys[i].ring, points)) continue;
+        if (best === -1 || polys[i].area < polys[best].area) best = i;
+      }
+      return best;
+    };
+    // 面が「陸を含む」か (最寄りフォールバック用)。面の代表点 1 つでは決められない
+    // (領海込みの国の面は陸と海の両方を含む) ので、bbox をグリッド走査して
+    // その面自身に落ちる点の陸海を見る。結果は面ごとに 1 度だけ計算して覚える。
+    const landContentCache = new Map();
+    const faceHasLand = (i) => {
+      if (isLand === null) return true;
+      if (landContentCache.has(i)) return landContentCache.get(i);
+      const bb = polys[i].bbox;
+      let found = false;
+      for (let gy = 1; gy < 12 && !found; gy += 1) {
+        for (let gx = 1; gx < 12 && !found; gx += 1) {
+          const x = bb.minX + ((bb.maxX - bb.minX) * gx) / 12;
+          const y = bb.minY + ((bb.maxY - bb.minY) * gy) / 12;
+          if (smallestContaining(x, y) === i && isLand(x, y)) found = true;
+        }
+      }
+      landContentCache.set(i, found);
+      return found;
+    };
+
+    const byPolygon = new Map();
+    const byLabel = [];
+    const push = (label, i, method, score) => {
+      byLabel.push({
+        text: label.name,
+        layer: label.layer ?? null,
+        polygonId: i === -1 ? null : polys[i].id,
+        polygonIndex: i === -1 ? null : i,
+        method: i === -1 ? null : method,
+        score: score ?? null,
+      });
+      if (i !== -1) {
+        const key = String(polys[i].id);
+        if (!byPolygon.has(key)) byPolygon.set(key, []);
+        byPolygon.get(key).push(label.name);
+      }
+    };
+
+    for (const label of labels) {
+      if (layerFilter !== null && !layerFilter.has(label.layer)) continue;
+      // 6. 手動裁定は常に最優先
+      const man = manual[label.name];
+      if (man !== undefined) {
+        const mi = smallestContaining(man[0], man[1]);
+        if (mi === -1) log(`手動割当先 (${man[0]},${man[1]}) を含む面がありません (${label.name})`);
+        push(label, mi, "manual", null);
+        continue;
+      }
+      // 1. 占有サンプルを最小含有面に配り、陸海も数える
+      const fp = labelFootprint(label);
+      const counts = new Map(); // 面 index → { n: サンプル数, land: うち陸 }
+      for (const [x, y] of fp.samples) {
+        const i = smallestContaining(x, y);
+        if (i === -1) continue;
+        let c = counts.get(i);
+        if (c === undefined) {
+          c = { n: 0, land: 0 };
+          counts.set(i, c);
+        }
+        c.n += 1;
+        if (isLand !== null && isLand(x, y)) c.land += 1;
+      }
+      // 2. 期待する中身のサンプルだけを有効票にする
+      const kind = isLand === null ? null : (expected[label.layer] ?? null);
+      const effOf = (c) => (kind === "land" ? c.land : kind === "sea" ? c.n - c.land : c.n);
+      const total = fp.samples.length || 1;
+      let best = -1;
+      let bestFrac = 0;
+      for (const [i, c] of counts) {
+        const eff = effOf(c);
+        if (eff <= 0) continue;
+        const frac = eff / total;
+        // 3. 占有最大 (同率なら小さい面 = より特定的なほう)
+        if (best === -1 || frac > bestFrac || (frac === bestFrac && polys[i].area < polys[best].area)) {
+          best = i;
+          bestFrac = frac;
+        }
+      }
+      // 4. 微小面の救済。被覆率はサンプルの数え上げだと微小面に落ちる点が少なすぎて
+      //    見誤る (実データ: 面積 6.8 の飛び国に 48 点中 1 点) ので、候補になり得る
+      //    小さい面に限って正確な切り抜き面積で計算する。
+      //    適用は「囲われた政体」を名指すレイヤー (国名・州名) だけ。地形を記述する
+      //    地名・山岳名・海名 (〇〇半島など) は広がりの名前で、文字列の頭がたまたま
+      //    載った小さな面を名指しているわけではない (実データ: トゥインク半島のラベルが
+      //    半島先端の小さな面を奪った) ため。
+      let bestMicro = -1;
+      let bestMicroCover = 0;
+      const lb = fp.bbox;
+      const microOk = (opts.microLayers ?? ["_国名", "_州名"]).includes(label.layer);
+      for (let i = 0; microOk && i < polys.length; i += 1) {
+        const a = polys[i].area;
+        if (a > fp.boxArea * 4) continue; // 「微小」側だけが対象 (大きい面は占有最大で決まる)
+        if (fp.boxArea > SIZE_RATIO_MAX * a) continue; // 釣り合わない大ラベルは微小面を奪えない
+        const bb = polys[i].bbox;
+        if (bb.maxX < lb.minX || bb.minX > lb.maxX || bb.maxY < lb.minY || bb.minY > lb.maxY) continue;
+        if (kind === "land" && !faceHasLand(i)) continue;
+        const ringPts = polys[i].ring.map((vi) => [points[vi].x, points[vi].y]);
+        const cover = overlapAreaWithBoxes(ringPts, fp.boxes) / Math.max(a, 1e-9);
+        if (
+          cover >= COVER_MIN &&
+          (bestMicro === -1 ||
+            cover > bestMicroCover ||
+            (cover === bestMicroCover && a < polys[bestMicro].area))
+        ) {
+          bestMicro = i;
+          bestMicroCover = cover;
+        }
+      }
+      if (bestMicro !== -1) {
+        push(label, bestMicro, "micro", bestMicroCover);
+        continue;
+      }
+      if (best !== -1) {
+        push(label, best, "overlap", bestFrac);
+        continue;
+      }
+      // 4b. 囲われた領域: 期待種別のサンプルがまったく無いが、ラベルはどこかの面には
+      //     載っている場合。実データでは「海上に境界線で囲い込まれた領土」に国名が
+      //     置かれている例があり (ヌィージン)、地形上は海でもその囲いの面こそが
+      //     その国の領域そのもの。ラベルの大きさが面と釣り合っている (箱面積 ≥ 面の
+      //     15%) ならその面を採る。外洋のような巨大な面はこの条件を満たさないので、
+      //     ただ海に浮いているだけのラベルは下の最寄りフォールバックへ落ちる。
+      if (counts.size > 0) {
+        let rawBest = -1;
+        let rawN = 0;
+        for (const [i, c] of counts) {
+          if (c.n > rawN || (c.n === rawN && rawBest !== -1 && polys[i].area < polys[rawBest].area)) {
+            rawBest = i;
+            rawN = c.n;
+          }
+        }
+        if (rawBest !== -1 && fp.boxArea >= 0.15 * polys[rawBest].area) {
+          push(label, rawBest, "enclosed", rawN / total);
+          continue;
+        }
+      }
+      // 5. 最寄りフォールバック: 陸を含む面のうち、リング頂点が最も近いもの
+      if (fallbackLayers.has(label.layer)) {
+        const [cx, cy] = labelCenter(label);
+        // 面ごとの最短頂点距離を近い順に見て、最初に「陸を含む」面を採る
+        const byDist = [];
+        for (let i = 0; i < polys.length; i += 1) {
+          const bb = polys[i].bbox;
+          const bx = Math.max(bb.minX - cx, 0, cx - bb.maxX);
+          const by = Math.max(bb.minY - cy, 0, cy - bb.maxY);
+          byDist.push([i, Math.hypot(bx, by)]);
+        }
+        byDist.sort((a, b) => a[1] - b[1]);
+        let near = -1;
+        let nearD = Infinity;
+        for (const [i, lower] of byDist) {
+          if (lower >= nearD) break; // bbox 距離の下限が現状の最短を超えたら打ち切り
+          let dMin = Infinity;
+          for (const vi of polys[i].ring) {
+            const d = Math.hypot(points[vi].x - cx, points[vi].y - cy);
+            if (d < dMin) dMin = d;
+          }
+          if (dMin < nearD && faceHasLand(i)) {
+            nearD = dMin;
+            near = i;
+          }
+        }
+        if (near !== -1) {
+          log(`最寄り割当 (どの面にも載らないラベル): ${label.name} → 面 ${polys[near].id}`);
+          push(label, near, "nearest", nearD);
+          continue;
+        }
+      }
+      push(label, -1, null, null);
+    }
+    return { byPolygon, byLabel };
   }
 
   // --- 5. 座標変換 -----------------------------------------------------------
@@ -868,7 +1381,6 @@
     const activePolygons = applyCleanup(normalized, points, input.edges || [], worldRect, opts, log);
 
     // 3. 包含解析 → 穴リング
-    const bboxes = activePolygons.map((p) => bboxOfRing(p.ring, points));
     const parentOf = computeParents(activePolygons, points);
     log(`包含解析: ${parentOf.filter((v) => v !== -1).length} 面が他の面に内包 → 穴リング化`);
 
@@ -947,79 +1459,35 @@
         return kx[0] - ky[0] || kx[1] - ky[1];
       });
 
-    const smallestContaining = (x, y) => {
-      let bestI = -1;
-      for (let i = 0; i < activePolygons.length; i += 1) {
-        const bb = bboxes[i];
-        if (x < bb.minX || x > bb.maxX || y < bb.minY || y > bb.maxY) continue;
-        if (!pointInRing(x, y, activePolygons[i].ring, points)) continue;
-        if (bestI === -1 || activePolygons[i].absArea < activePolygons[bestI].absArea) bestI = i;
-      }
-      return bestI;
-    };
-
-    // 4. 国名ラベルの割り当て
-    const countryLabels = extractLabels(svgDoc, "_国名");
+    // 4. 国名ラベルの割り当て (判定は assignLabelsToPolygons — 考え方はその定義に書いてある)
+    const hierarchical = input.countryPolygons != null;
+    const countryLabels = extractLabels(svgDoc, "_国名").filter(
+      // 同君連合の親名ラベルは集約側で使うため、面への割当から除外する
+      (l) => !(hierarchical && UNION_PARENT_NAMES.has(l.name)),
+    );
     log(`国名ラベル: ${countryLabels.length} 件`);
+    // 陸海の判定は地形レイヤーから (ブラウザ以外では null → 陸海で絞らずに続行)
+    const isLand = opts.isLand ?? makeLandTester(svgDoc);
+    const assignPolygons = activePolygons.map((p) => ({ id: p.id, points: p.ring, area: p.absArea }));
+    const countryAssign = assignLabelsToPolygons(countryLabels, assignPolygons, points, {
+      isLand,
+      manualAssign: opts.manualLabelAssign || MANUAL_LABEL_ASSIGN,
+      log,
+    });
     const nameOf = new Array(activePolygons.length).fill(null);
     const unmatched = [];
-    const hierarchical = input.countryPolygons != null;
-    for (const label of countryLabels) {
-      if (hierarchical && UNION_PARENT_NAMES.has(label.name)) continue;
-      // テキストはアンカーから rotate 方向へ「文字数 × font-size」だけ伸び、グリフは
-      // ベースラインの上に乗る。文字列に沿って密にサンプルし、いずれかの点を含む面の
-      // うち最小面積のものを選ぶ (極小の飛び国の上を文字列が横切る場合、周囲の大国で
-      // なく飛び国に割り当てるため)。
-      const rad = (label.angleDeg * Math.PI) / 180;
-      const len = label.firstLineLen * label.fontSize;
-      const lift = label.fontSize * 0.35; // ベースラインからグリフ中央への持ち上げ
-      const atLift = (t, liftScale) => [
-        label.x + Math.cos(rad) * len * t + Math.sin(rad) * lift * liftScale,
-        label.y + Math.sin(rad) * len * t - Math.cos(rad) * lift * liftScale,
-      ];
-      const at = (t) => atLift(t, 1);
-      const dense = [];
-      for (let t = 0; t <= 1.0001; t += 0.1) dense.push(atLift(t, 1), atLift(t, 0));
-      // 1) マイクロ国家 (面積 < 100): 文字列がその上を通っていれば最優先で採用
-      const MICRO_AREA = 100;
-      let bestI = -1;
-      for (const [x, y] of dense) {
-        const i = smallestContaining(x, y);
-        if (
-          i !== -1 &&
-          activePolygons[i].absArea < MICRO_AREA &&
-          (bestI === -1 || activePolygons[i].absArea < activePolygons[bestI].absArea)
-        ) {
-          bestI = i;
-        }
-      }
-      // 2) 通常国: 文字列の中央 → 1/4・3/4 点 → アンカー の先着順
-      if (bestI === -1) {
-        for (const [x, y] of [at(0.5), at(0.25), at(0.75), [label.x, label.y], at(1.0)]) {
-          bestI = smallestContaining(x, y);
-          if (bestI !== -1) break;
-        }
-      }
-      if (bestI === -1) {
-        unmatched.push(label.name);
-      } else if (nameOf[bestI] === null) {
-        nameOf[bestI] = label.name;
-      } else {
-        nameOf[bestI] = `${nameOf[bestI]}・${label.name}`;
-        log(`ラベル衝突: ${nameOf[bestI]} (面 ${activePolygons[bestI].id})`);
-      }
-    }
-    for (const [name, at] of Object.entries(opts.manualLabelAssign || MANUAL_LABEL_ASSIGN)) {
-      const idx = unmatched.indexOf(name);
-      if (idx === -1) continue;
-      const pi = smallestContaining(at[0], at[1]);
-      if (pi === -1) {
-        log(`手動割当先 (${at[0]},${at[1]}) を含む面がありません (${name})`);
+    for (const r of countryAssign.byLabel) {
+      if (r.polygonIndex == null) {
+        unmatched.push(r.text);
         continue;
       }
-      unmatched.splice(idx, 1);
-      nameOf[pi] = nameOf[pi] === null ? name : `${nameOf[pi]}・${name}`;
-      log(`手動割当: ${name} → 面 ${activePolygons[pi].id}`);
+      if (r.method === "manual") log(`手動割当: ${r.text} → 面 ${r.polygonId}`);
+      if (nameOf[r.polygonIndex] === null) {
+        nameOf[r.polygonIndex] = r.text;
+      } else {
+        nameOf[r.polygonIndex] = `${nameOf[r.polygonIndex]}・${r.text}`;
+        log(`ラベル衝突: ${nameOf[r.polygonIndex]} (面 ${r.polygonId})`);
+      }
     }
     if (unmatched.length > 0) {
       log(`どの面にも入らなかった国名ラベル (${unmatched.length}): ${unmatched.join(", ")}`);
@@ -1030,30 +1498,37 @@
     //   - 面内に 州名/地名 ラベル → その名前 (島の固有名・州名・地方名)
     //   - 海域の面内に 海名 ラベル → その海名
     //   - 上記なしの島 → 最寄りの海名から「〇〇海の島NN」
+    // どの面に載っているかの判定は国名と同じ assignLabelsToPolygons (占有面積の多数決)。
     const stateLabels = extractLabels(svgDoc, "_州名");
     const placeLabels = extractLabels(svgDoc, "_地名");
     const mountainLabels = extractLabels(svgDoc, "_山岳名");
-    const collectInto = (labels) => {
+    const seaLabelsRaw = extractLabels(svgDoc, "_海名");
+    const regionAssign = assignLabelsToPolygons(
+      [...stateLabels, ...placeLabels, ...seaLabelsRaw],
+      assignPolygons,
+      points,
+      { isLand, log },
+    );
+    const bucketize = (layerId) => {
       const buckets = new Array(activePolygons.length).fill(null).map(() => []);
-      for (const label of labels) {
-        const [cx, cy] = labelCenter(label);
-        const i = smallestContaining(cx, cy);
-        if (i !== -1 && !buckets[i].includes(label.name)) buckets[i].push(label.name);
+      for (const r of regionAssign.byLabel) {
+        if (r.layer !== layerId || r.polygonIndex == null) continue;
+        if (!buckets[r.polygonIndex].includes(r.text)) buckets[r.polygonIndex].push(r.text);
       }
       return buckets;
     };
-    const regionNamesOf = collectInto([...stateLabels, ...placeLabels]);
-    const stateNamesOf = collectInto(stateLabels);
-    const placeNamesOf = collectInto(placeLabels);
-    const seaLabels = extractLabels(svgDoc, "_海名").map((l) => {
+    const stateNamesOf = bucketize("_州名");
+    const placeNamesOf = bucketize("_地名");
+    const seaNamesOf = bucketize("_海名");
+    // 州名 → 地名 の順 (従来の collectInto と同じ優先順)
+    const regionNamesOf = stateNamesOf.map((a, i) => [
+      ...a,
+      ...placeNamesOf[i].filter((n) => !a.includes(n)),
+    ]);
+    const seaLabels = seaLabelsRaw.map((l) => {
       const [cx, cy] = labelCenter(l);
       return { name: l.name, cx, cy };
     });
-    const seaNamesOf = new Array(activePolygons.length).fill(null).map(() => []);
-    for (const sea of seaLabels) {
-      const i = smallestContaining(sea.cx, sea.cy);
-      if (i !== -1 && !seaNamesOf[i].includes(sea.name)) seaNamesOf[i].push(sea.name);
-    }
     const centroids = activePolygons.map((p) => {
       let sx = 0;
       let sy = 0;
@@ -1582,8 +2057,15 @@
   }
 
   /** 点が線分上に載っているか。 */
-  function onSegment(p, a, b) {
-    if (crossSign(a, b, p) !== 0) return false;
+  function onSegment(p, a, b, eps) {
+    const cross = crossSign(a, b, p);
+    if (eps) {
+      // |外積| = |ab| × 点と直線の距離。距離が eps 以内なら辺の上と見なす
+      const len = Math.hypot(b.lon - a.lon, b.lat - a.lat);
+      if (Math.abs(cross) > eps * len) return false;
+    } else if (cross !== 0) {
+      return false;
+    }
     return (
       p.lon >= Math.min(a.lon, b.lon) &&
       p.lon <= Math.max(a.lon, b.lon) &&
@@ -1630,7 +2112,14 @@
     a.minLon <= b.maxLon && b.minLon <= a.maxLon && a.minLat <= b.maxLat && b.minLat <= a.maxLat;
 
   /** 点とリングの位置関係: "in" (内) / "out" (外) / "on" (境界上)。 */
-  function locateInRing(idx, p) {
+  /**
+   * @param eps 境界の上と見なす距離。既定 0 = 厳密。
+   *   頂点を問い合わせるときは 0 でよい（境界を共有する面は同じ頂点を使うので外積が
+   *   きっちり 0 になる）。**頂点でない点（辺の中点など）を問い合わせるときは必ず
+   *   正の値を渡すこと。** 0 のままだと外積が 1e-17 程度になって「境界の上」と判定
+   *   されず、レイの交差数がその場の丸め次第で決まる＝在外判定が当てにならなくなる。
+   */
+  function locateInRing(idx, p, eps) {
     if (p.lon < idx.minLon || p.lon > idx.maxLon || p.lat < idx.minLat || p.lat > idx.maxLat) {
       return "out";
     }
@@ -1638,7 +2127,7 @@
     for (const i of idx.bands[idx.bandOf(p.lat)]) {
       const a = idx.geo[i];
       const b = idx.geo[(i + 1) % idx.n];
-      if (onSegment(p, a, b)) return "on";
+      if (onSegment(p, a, b, eps)) return "on";
       if (
         a.lat > p.lat !== b.lat > p.lat &&
         p.lon < ((b.lon - a.lon) * (p.lat - a.lat)) / (b.lat - a.lat) + a.lon
@@ -1693,16 +2182,20 @@
    * 点が地物の「実面積」の内側か。外周の内側で、かつどの穴の内側でもないとき "in"。
    * 境界 (外周でも穴でも) に載っていれば "on"。アプリ側の pointInPolygon と同じ扱い。
    */
-  function locateInFace(face, p) {
-    const outer = locateInRing(face.rings[0], p);
+  function locateInFace(face, p, eps) {
+    const outer = locateInRing(face.rings[0], p, eps);
     if (outer !== "in") return outer;
     for (let k = 1; k < face.rings.length; k += 1) {
-      const h = locateInRing(face.rings[k], p);
+      const h = locateInRing(face.rings[k], p, eps);
       if (h === "on") return "on";
       if (h === "in") return "out";
     }
     return "in";
   }
+
+  // 辺の中点を問い合わせるときの「境界の上」の許容値（度）。座標は 1e-7 度に丸めて
+  // あるので、その 1/10 なら丸め由来のずれだけを吸収し、本当に内側にある点は拾える。
+  const MIDPOINT_ON_EPS = 1e-8;
 
   /**
    * リング ring の頂点のうち 1 つでも地物 face の実面積の内側 (境界上は含まない) に
@@ -1714,9 +2207,20 @@
    * 「真の交差」にはならない。重なりの証拠は B の途中の頂点が A の内側にあることだけで、
    * それはリングの並びの途中に現れる (実データ: 面 112 と 113 がこの形)。
    */
+
   function anyVertexStrictlyInside(face, ring) {
-    for (const p of ring.geo) {
-      if (locateInFace(face, p) === "in") return true;
+    const pts = ring.geo;
+    for (let i = 0; i < pts.length; i += 1) {
+      if (locateInFace(face, pts[i]) === "in") return true;
+      // 辺の中点も見る。頂点だけだと「正の面積で重なっているのに、頂点は全部相手の
+      // 境界上か外側」という形を取りこぼす (外部レビュー指摘)。
+      //   A = (0,0)-(2,0)-(2,2)-(0,2) / B = (1,0)-(3,0)-(3,2)-(1,2)
+      // は [1,0]-[2,2] で重なるが、B の頂点 (1,0)(1,2) は A の境界上、(3,0)(3,2) は外側。
+      // 辺どうしも共線で触れるだけなので「真の交差」にもならない。B の辺 (1,0)-(1,2) の
+      // 中点 (1,1) だけが証拠になる。
+      const q = pts[(i + 1) % pts.length];
+      const mid = { lon: (pts[i].lon + q.lon) / 2, lat: (pts[i].lat + q.lat) / 2 };
+      if (locateInFace(face, mid, MIDPOINT_ON_EPS) === "in") return true;
     }
     return false;
   }
@@ -1951,18 +2455,20 @@
     const progress = typeof opts.onProgress === "function" ? opts.onProgress : () => {};
     const log = typeof opts.log === "function" ? opts.log : () => {};
     const keepFullIds = new Set(opts.keepFullIds ?? []);
+    // ラベル割当の陸判定は 1 度だけ作って全ラウンドで使い回す (地形は変わらない)
+    const isLand = opts.isLand ?? makeLandTester(input.svgDoc);
     const MAX_ROUNDS = 6;
     let manifest = null;
     for (let round = 1; round <= MAX_ROUNDS; round += 1) {
       progress(`間引き ${round} 回目を組み立て中…`);
-      manifest = buildManifest({ ...input, options: { ...opts, keepFullIds } });
+      manifest = buildManifest({ ...input, options: { ...opts, isLand, keepFullIds } });
       progress(`間引き ${round} 回目の整合性を確認中…`);
       const violations = checkManifestConsistency(manifest);
       if (violations.length === 0) {
         progress(
           `整合性チェック: 問題なし (${round} 回目 / 原型維持 ${keepFullIds.size} 面)`,
         );
-        return manifest;
+        return { manifest, converged: true, violations: [] };
       }
       let added = 0;
       for (const v of violations) {
@@ -1978,11 +2484,11 @@
       if (added === 0) {
         // 新たに救済できる面が無い = これ以上ループしても同じ結果にしかならない
         progress(`整合性チェック: ${violations.length} 件が残りました (救済できる面なし)`);
-        return manifest;
+        return { manifest, converged: false, violations };
       }
     }
     progress(`整合性チェック: ${MAX_ROUNDS} 回で収束しませんでした`);
-    return manifest;
+    return { manifest, converged: false, violations: checkManifestConsistency(manifest) };
   }
 
   // --- 10. .gimoza の書き出し -------------------------------------------------
@@ -1994,10 +2500,22 @@
   async function exportGimoza(input) {
     const opts = input.options || {};
     const worldRect = opts.worldRect || worldRectFromSvg(input.svgDoc);
-    const manifest =
-      opts.targetVertices == null
-        ? buildManifest({ ...input, options: { ...opts, worldRect } })
-        : buildSimplifiedManifest(input, { ...opts, worldRect });
+    let manifest;
+    if (opts.targetVertices == null) {
+      manifest = buildManifest({ ...input, options: { ...opts, worldRect } });
+    } else {
+      const result = buildSimplifiedManifest(input, { ...opts, worldRect });
+      // 収束しなかったものを黙って返してはいけない。アプリが読み込みで落とすデータを
+      // 「書き出しました」とだけ告げることになる (外部レビュー指摘)。
+      if (!result.converged) {
+        const kinds = [...new Set(result.violations.map((v) => v.kind))].join(" / ");
+        throw new Error(
+          `間引きが整合性を満たすところまで収束しませんでした (残り ${result.violations.length} 件: ${kinds})。` +
+            `目標頂点数を大きくするか、空欄にしてフル版を書き出してください。`,
+        );
+      }
+      manifest = result.manifest;
+    }
     const encoder = new TextEncoder();
     const baseMapAsset =
       input.baseMapAsset ?? encoder.encode(JSON.stringify(extractVectorBaseMap(input.svgDoc, worldRect)));
@@ -2016,11 +2534,16 @@
     buildSimplifiedManifest,
     checkManifestConsistency,
     exportGimoza,
+    assignLabelsToPolygons,
+    makeLandTester,
     // 下位の部品 (検証・調整用)
     cleanRing,
     decomposeRing,
     simplifyKeepSet,
     extractLabels,
+    labelCenter,
+    labelFootprint,
+    LABEL_LAYER_IDS,
     ringGeo,
     makeRingIndex,
     locateInRing,
