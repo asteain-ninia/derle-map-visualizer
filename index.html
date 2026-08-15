@@ -64,6 +64,49 @@
       letter-spacing: 0.08em;
     }
 
+    /* 折りたたみにした設定欄。見出しをそのまま摘みに使う（h2 を summary の中へ入れて
+       インライン表示にする。既定の marker は残すので開閉が分かる） */
+    details.group > summary {
+      cursor: pointer;
+      list-style-position: outside;
+    }
+
+    details.group > summary h2 {
+      display: inline;
+      margin: 0;
+    }
+
+    details.group[open] > summary h2 {
+      display: inline-block;
+      margin-bottom: 4px;
+    }
+
+    .selection-info {
+      font-size: 12px;
+      line-height: 1.7;
+    }
+
+    .selection-info .placeholder {
+      color: var(--muted);
+    }
+
+    .selection-info dl {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 2px 10px;
+      margin: 0;
+    }
+
+    .selection-info dt {
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .selection-info dd {
+      margin: 0;
+      overflow-wrap: anywhere;
+    }
+
     label {
       display: block;
       font-size: 12px;
@@ -284,7 +327,14 @@
     </div>
 
     <div class="group">
-      <h2>間引き</h2>
+      <h2>選択中の地物</h2>
+      <div id="selectionInfo" class="selection-info">
+        <div class="placeholder">多角形をクリックすると内容を表示します。</div>
+      </div>
+    </div>
+
+    <details class="group">
+      <summary><h2>間引き</h2></summary>
       <label for="sampleStep">間引き間隔（地図単位）</label>
       <input id="sampleStep" type="number" min="0.2" step="0.2" value="1.2" />
       <label for="snapTolerance">吸着許容値（地図単位）</label>
@@ -298,7 +348,7 @@
       <label for="bridgeBorderRadius">橋渡し半径・国境どうし（地図単位）</label>
       <input id="bridgeBorderRadius" type="number" min="0" step="0.5" value="6" />
       <div class="note">行き止まりの国境端点を近くの点へ繋いで、閉じ損ねた面を閉じます。大きい方の半径は、両端とも国境線の点のときだけ使います。</div>
-    </div>
+    </details>
 
     <div class="group">
       <h2>操作</h2>
@@ -381,6 +431,8 @@
       // 包含・領有はいずれも「面 id → 面 id」。抽出時に埋まる（詳細は extractPolygons のコメント）
       polygonParents: new Map(),
       polygonOwners: new Map(),
+      // 面 id → その面に載っている原図のラベル文字（複数ありうる）。抽出の最後に埋まる
+      polygonLabels: new Map(),
       selectedPolygons: new Set(),
       selectionOverlay: null,
       selectionBoundary: null,
@@ -432,6 +484,7 @@
       extractBtn: document.getElementById("extractBtn"),
       exportBtn: document.getElementById("exportBtn"),
       exportHierarchy: document.getElementById("exportHierarchy"),
+      selectionInfo: document.getElementById("selectionInfo"),
       exportTargetVertices: document.getElementById("exportTargetVertices"),
       clearBtn: document.getElementById("clearBtn"),
       toggleLandBtn: document.getElementById("toggleLandBtn"),
@@ -586,7 +639,60 @@
       return -1;
     }
 
-    function collectSharedSeaPolygons(borderGraph, borderPolygons, snap) {
+    /**
+     * 「点が海岸線の上にあるか」を tolerance 以内で答える関数を作る。
+     * 線分を一様グリッドに入れて近傍セルだけを見る（海岸線は 4 万本あるので総当たりは無理）。
+     */
+    function makeCoastProximityTest(coastSegments, tolerance) {
+      if (!coastSegments || coastSegments.length === 0) return () => false;
+      const cellSize = Math.max(tolerance, GEOM_EPS) * 2;
+      const tol2 = tolerance * tolerance;
+      const grid = new Map();
+      const key = (cx, cy) => `${cx}:${cy}`;
+      coastSegments.forEach((seg) => {
+        // 線分がまたぐセルすべてに入れる（端点のセルだけだと長い線分を取りこぼす）
+        const x0 = Math.floor(Math.min(seg.a.x, seg.b.x) / cellSize);
+        const x1 = Math.floor(Math.max(seg.a.x, seg.b.x) / cellSize);
+        const y0 = Math.floor(Math.min(seg.a.y, seg.b.y) / cellSize);
+        const y1 = Math.floor(Math.max(seg.a.y, seg.b.y) / cellSize);
+        for (let cx = x0; cx <= x1; cx += 1) {
+          for (let cy = y0; cy <= y1; cy += 1) {
+            const k = key(cx, cy);
+            if (!grid.has(k)) grid.set(k, []);
+            grid.get(k).push(seg);
+          }
+        }
+      });
+
+      const distSqToSegment = (p, a, b) => {
+        const vx = b.x - a.x;
+        const vy = b.y - a.y;
+        const len2 = vx * vx + vy * vy;
+        if (len2 <= 0) return distanceSq(p, a);
+        let t = ((p.x - a.x) * vx + (p.y - a.y) * vy) / len2;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const dx = p.x - (a.x + t * vx);
+        const dy = p.y - (a.y + t * vy);
+        return dx * dx + dy * dy;
+      };
+
+      return (point) => {
+        const cx = Math.floor(point.x / cellSize);
+        const cy = Math.floor(point.y / cellSize);
+        for (let dx = -1; dx <= 1; dx += 1) {
+          for (let dy = -1; dy <= 1; dy += 1) {
+            const list = grid.get(key(cx + dx, cy + dy));
+            if (!list) continue;
+            for (let i = 0; i < list.length; i += 1) {
+              if (distSqToSegment(point, list[i].a, list[i].b) <= tol2) return true;
+            }
+          }
+        }
+        return false;
+      };
+    }
+
+    function collectSharedSeaPolygons(borderGraph, borderPolygons, snap, coastSegments) {
       if (!borderGraph || borderPolygons.length === 0) {
         return { polygonData: [], sharedPolygons: new Set(), tolerance: 0 };
       }
@@ -598,9 +704,19 @@
       const polygonData = buildPolygonData(borderPolygons, borderGraph.points);
       const tolerance = Math.max(GEOM_EPS, snap * 0.1);
       const sharedPolygons = new Set();
+      // 要件定義書 §6.3 の「国境線が海岸線で終了し」を字義どおりに取る。
+      // 自由端が海岸線の上にあることまで確かめないと、作図で残った長さ 1 前後の「髭」
+      // （2 本の国境パスが V 字に出会う尖端の残り。実データに多数ある）を
+      // 「海岸線で終わる国境」と取り違え、その国が丸ごと共有する海に化ける。
+      // 実測: この条件を足すと共有する海の面が 64 → 28 に減り、報告された誤りが全部消える。
+      const isOnCoast = makeCoastProximityTest(coastSegments, Math.max(snap, GEOM_EPS));
 
       borderGraph.edges.forEach((edge) => {
-        if (degrees[edge.a] !== 1 && degrees[edge.b] !== 1) return;
+        const freeEnds = [];
+        if (degrees[edge.a] === 1) freeEnds.push(borderGraph.points[edge.a]);
+        if (degrees[edge.b] === 1) freeEnds.push(borderGraph.points[edge.b]);
+        if (freeEnds.length === 0) return;
+        if (!freeEnds.some((point) => isOnCoast(point))) return;
         const a = borderGraph.points[edge.a];
         const b = borderGraph.points[edge.b];
         const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
@@ -1994,7 +2110,112 @@
       updateSelectionOverlay();
       updateSelectionBoundary();
       computeAndDisplayArea();
+      renderSelectionInfo();
       scheduleWikipediaUpdate(false);
+    }
+
+    /**
+     * 原図のラベル文字を面へ対応付ける。判定は gimoza.js（書き出しと同じもの）に任せる。
+     * ここで自前判定を書くと、画面に出る名前と書き出される名前がずれるため。
+     */
+    function collectPolygonLabels() {
+      const empty = new Map();
+      if (!state.svgDoc || !state.polygons.length) return empty;
+      if (!window.Gimoza || typeof Gimoza.assignLabelsToPolygons !== "function") return empty;
+      try {
+        const labels = Gimoza.extractLabels(state.svgDoc);
+        const assigned = Gimoza.assignLabelsToPolygons(labels, state.polygons, state.graph.points, {});
+        const out = new Map();
+        // 国名とそれ以外を分ける。国レベルの面には州名・地名・海名・山岳名まで
+        // 全部載る（デーレ共和国で 55 件）ので、そのまま並べると読めない。
+        (assigned.byLabel || []).forEach((entry) => {
+          if (entry.polygonId === null || entry.polygonId === undefined) return;
+          const key = String(entry.polygonId);
+          let bucket = out.get(key);
+          if (!bucket) {
+            bucket = { primary: [], others: [] };
+            out.set(key, bucket);
+          }
+          (entry.layer === "_国名" ? bucket.primary : bucket.others).push(entry.text);
+        });
+        return out;
+      } catch (error) {
+        setStatus(`ラベルの対応付けに失敗しました: ${error.message}`);
+        return empty;
+      }
+    }
+
+    const SELECTION_LABEL_LIMIT = 5;
+
+    /** 選択中の面に出す名前。国名を先に、それ以外は数件だけ並べて残りは件数で示す。 */
+    function formatSelectionLabels(bucket) {
+      if (!bucket || (!bucket.primary.length && !bucket.others.length)) {
+        return '<span class="placeholder">（ラベルなし）</span>';
+      }
+      const parts = [];
+      if (bucket.primary.length) {
+        parts.push(`<strong>${bucket.primary.map(escapeHtml).join("、")}</strong>`);
+      }
+      if (bucket.others.length) {
+        const shown = bucket.others.slice(0, SELECTION_LABEL_LIMIT).map(escapeHtml).join("、");
+        const rest = bucket.others.length - SELECTION_LABEL_LIMIT;
+        parts.push(rest > 0 ? `${shown} ほか ${rest} 件` : shown);
+      }
+      return parts.join("<br>");
+    }
+
+    /** 選択中の面の中身（載っているラベル・種別・面積・内包/領有）を出す。 */
+    function renderSelectionInfo() {
+      const box = el.selectionInfo;
+      if (!box) return;
+      const ids = [...state.selectedPolygons];
+      if (ids.length === 0) {
+        box.innerHTML = '<div class="placeholder">多角形をクリックすると内容を表示します。</div>';
+        return;
+      }
+      if (ids.length > 1) {
+        // 複数選択のときは種別の内訳だけ。1 件ずつ並べると縦に伸びすぎる
+        const counts = new Map();
+        ids.forEach((id) => {
+          const type = state.polygonTypes.get(id) || "不明";
+          counts.set(type, (counts.get(type) || 0) + 1);
+        });
+        const rows = [...counts.entries()]
+          .map(([type, n]) => `<dt>${escapeHtml(type)}</dt><dd>${n}面</dd>`)
+          .join("");
+        box.innerHTML = `<dl><dt>選択</dt><dd>${ids.length}面</dd>${rows}</dl>`;
+        return;
+      }
+
+      const id = ids[0];
+      const poly = state.polygonsById.get(id);
+      const rows = [
+        ["地物名", formatSelectionLabels(state.polygonLabels && state.polygonLabels.get(id))],
+        ["種別", escapeHtml(state.polygonTypes.get(id) || "不明")],
+        ["面 id", escapeHtml(id)],
+        ["面積", poly ? poly.area.toFixed(2) : "—"],
+      ];
+      const parent = state.polygonParents.get(id);
+      if (parent) rows.push(["内包する面", escapeHtml(parent)]);
+      const owner = state.polygonOwners.get(id);
+      rows.push([
+        "領有",
+        owner
+          ? `面 ${escapeHtml(owner)} に領有されている`
+          : '<span class="placeholder">なし</span>',
+      ]);
+      const owned = [];
+      state.polygonOwners.forEach((ownerId, childId) => {
+        if (ownerId === id) owned.push(childId);
+      });
+      if (owned.length) rows.push(["領有している面", `${owned.length}面`]);
+
+      box.innerHTML = `<dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>`;
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"]/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
     }
 
     function handleOverlayClick(event) {
@@ -2389,7 +2610,7 @@
             updateProgress("国境線の構造解析中", done, total);
           });
           const borderResult = DerleLogic.extractPolygonsFromGraph(borderGraph, minArea);
-          sharedInfo = collectSharedSeaPolygons(borderGraph, borderResult.polygons, snap);
+          sharedInfo = collectSharedSeaPolygons(borderGraph, borderResult.polygons, snap, coastOnlySegments);
           sharedSeaCount = sharedInfo.sharedPolygons.size;
 
           const filteredCoastSegments = filterCoastSegments(
@@ -2567,6 +2788,9 @@
             }
           });
         }
+
+        await step("ラベルを面へ対応付け中...");
+        state.polygonLabels = collectPolygonLabels();
 
         await step("球面出力の下ごしらえ中...");
         buildWikipediaCache();

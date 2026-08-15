@@ -566,6 +566,12 @@
 
     const tryProcessPathGroup = (groupInfo) => {
       if (!groupInfo || groupInfo.paths.length < 2) return false;
+      // この一本化は「点線国境が 1 本の線を複数 path に分けて描いてある」のを繋ぎ直すための
+      // ものなので、国境レイヤーにだけ効かせる。海岸線に効かせると、独立した島の輪郭どうしが
+      // 直線で結ばれて存在しない海岸線ができる（実データの _第一分高面 にも 4 path のグループが
+      // あり、繋ぐと 254〜396 地図単位＝世界幅の 6〜9% の人工線ができる形だった。たまたま
+      // 1 本がサブパス複数で中止されていただけで、条件が揃えば静かに壊れる）。
+      if (sourceTag !== "border") return false;
       const pointsList = [];
       for (let i = 0; i < groupInfo.paths.length; i += 1) {
         const pathEl = groupInfo.paths[i];
@@ -992,6 +998,27 @@
     return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
   }
 
+  /**
+   * 点 p が線分 ab の上（両端を除く）に乗っているか。
+   * 橋渡しが既存の頂点を途中で踏むと、そこにノードが無いままグラフが非平面になる。
+   * 「真に交差する」判定だけではこれを取りこぼすので別に見る。
+   */
+  // 「乗っている」と見なす距離。地図の座標は 0〜4200 程度で、吸着で併合されなかった点は
+  // 通常 1 以上離れているので、これを超えて緩めると正当な橋渡しまで弾いてしまう。
+  const COLLINEAR_EPS = 1e-6;
+
+  function pointOnOpenSegment(p, a, b, eps) {
+    const vx = b.x - a.x;
+    const vy = b.y - a.y;
+    const len2 = vx * vx + vy * vy;
+    if (len2 <= 0) return false;
+    const len = Math.sqrt(len2);
+    // orient2d は |ab| × 点と直線の距離。距離が eps を超えていれば乗っていない
+    if (Math.abs(orient2d(a, b, p)) > eps * len) return false;
+    const t = ((p.x - a.x) * vx + (p.y - a.y) * vy) / len2;
+    return t * len > eps && (1 - t) * len > eps;
+  }
+
   /** 端点を共有しない 2 線分が真に交差するか（端点で触れているだけは交差としない）。 */
   function properlyCrosses(p1, p2, p3, p4) {
     const d1 = orient2d(p3, p4, p1);
@@ -1098,6 +1125,24 @@
       addToGrid(i, points[edges[i].a], points[edges[i].b]);
     }
 
+    // 候補の相手を探すための点のグリッド。セル幅は「ありうる最大の半径」にしておくと、
+    // 周囲 1 セルぶんを見るだけで半径内の点を必ず含む。
+    let maxRadius = Math.max(radiusBase, borderRadiusBase);
+    for (let i = 0; i < extraBridges.length; i += 1) {
+      if (extraBridges[i].r > maxRadius) maxRadius = extraBridges[i].r;
+    }
+    const POINT_CELL = Math.max(maxRadius, 1e-6);
+    const pointGrid = new Map();
+    for (let i = 0; i < points.length; i += 1) {
+      const k = cellKey(Math.floor(points[i].x / POINT_CELL), Math.floor(points[i].y / POINT_CELL));
+      let list = pointGrid.get(k);
+      if (list === undefined) {
+        list = [];
+        pointGrid.set(k, list);
+      }
+      list.push(i);
+    }
+
     /** 橋渡し tip→target が既存辺と交差するなら true（＝採用不可）。 */
     const bridgeCrosses = (ti, tj) => {
       const p1 = points[ti];
@@ -1118,7 +1163,20 @@
             const e = edges[ei];
             // 端点を共有する辺は「交差」ではない（橋の根元と先で必ず触れるため）
             if (e.a === ti || e.b === ti || e.a === tj || e.b === tj) continue;
-            if (properlyCrosses(p1, p2, points[e.a], points[e.b])) return true;
+            const ea = points[e.a];
+            const eb = points[e.b];
+            if (properlyCrosses(p1, p2, ea, eb)) return true;
+            // 「真の交差」にはならないが平面性を壊す形も弾く:
+            //   ・橋が既存の頂点を途中で踏む（その頂点にノードが無いまま辺が重なる）
+            //   ・橋と既存辺が共線で正の長さぶん重なる（橋が既存辺の内側に収まる場合を含む）
+            if (pointOnOpenSegment(ea, p1, p2, COLLINEAR_EPS)) return true;
+            if (pointOnOpenSegment(eb, p1, p2, COLLINEAR_EPS)) return true;
+            if (
+              pointOnOpenSegment(p1, ea, eb, COLLINEAR_EPS) &&
+              pointOnOpenSegment(p2, ea, eb, COLLINEAR_EPS)
+            ) {
+              return true;
+            }
           }
         }
       }
@@ -1164,14 +1222,25 @@
       // 国境線の行き止まりだけ、国境線の点に対して大きい半径を許す
       const borderRadius = isBorderPoint[tip] === 1 ? Math.max(radius, borderRadiusBase) : radius;
 
-      // 候補を距離順に並べ、既存辺と交差しない最も近い相手を採用する
+      // 候補を距離順に並べ、既存辺と交差しない最も近い相手を採用する。
+      // 半径は必ず POINT_CELL 以下なので、周囲 1 セルぶんを見れば取りこぼさない
+      // （全点走査だと、行き止まりが大量にある入力で行き止まり数 × 点数まで膨らむ）。
       const candidates = [];
-      for (let j = 0; j < points.length; j += 1) {
-        if (near.has(j)) continue;
-        const q = points[j];
-        const d = Math.hypot(q.x - p.x, q.y - p.y);
-        const limit = isBorderPoint[j] === 1 ? borderRadius : radius;
-        if (d < limit) candidates.push({ j, d });
+      const pcx = Math.floor(p.x / POINT_CELL);
+      const pcy = Math.floor(p.y / POINT_CELL);
+      for (let dx = -1; dx <= 1; dx += 1) {
+        for (let dy = -1; dy <= 1; dy += 1) {
+          const list = pointGrid.get(cellKey(pcx + dx, pcy + dy));
+          if (list === undefined) continue;
+          for (let n = 0; n < list.length; n += 1) {
+            const j = list[n];
+            if (near.has(j)) continue;
+            const q = points[j];
+            const d = Math.hypot(q.x - p.x, q.y - p.y);
+            const limit = isBorderPoint[j] === 1 ? borderRadius : radius;
+            if (d < limit) candidates.push({ j, d });
+          }
+        }
       }
       candidates.sort((u, v) => u.d - v.d);
       let best = -1;
