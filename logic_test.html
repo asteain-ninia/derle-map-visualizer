@@ -120,6 +120,23 @@
       <label><input id="toggleEndpoints" type="checkbox" />Show split endpoints</label>
     </section>
     <section id="cases" class="cases"></section>
+
+    <section class="controls" style="flex-direction: column; align-items: stretch; gap: 8px;">
+      <h2 style="margin: 0; font-size: 16px;">点列化の新旧比較（サンプリング方式）</h2>
+      <p style="margin: 0; color: var(--muted); font-size: 13px;">
+        実際の SVG を選ぶと、旧方式（getPointAtLength で等間隔サンプリング）と
+        新方式（<code>d</code> 属性を直接解釈し曲線だけ適応分割）を同じ入力に掛け、
+        <strong>形状のずれ・点数・所要時間</strong>を突き合わせます。ずれは双方向の
+        最大距離（片方の各点から他方の折れ線までの距離の最大）で、単位は地図単位。
+      </p>
+      <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+        <input id="cmpFile" type="file" accept="image/svg+xml" />
+        <label>間引き間隔 <input id="cmpStep" type="number" value="1.2" step="0.2" min="0.2" style="width: 70px;" /></label>
+        <label>曲線許容差 <input id="cmpTol" type="number" value="0.05" step="0.01" min="0.001" style="width: 70px;" /></label>
+        <button id="cmpRun" type="button">比較する</button>
+      </div>
+      <pre id="cmpOut" style="margin: 0; padding: 12px; background: #0b0f15; border: 1px solid var(--panel-border); border-radius: 8px; overflow: auto; max-height: 420px; font-size: 12px; line-height: 1.5;">SVG を選んで「比較する」を押してください。</pre>
+    </section>
   </main>
 
   <svg id="measure" width="0" height="0" style="position:absolute; left:-9999px; top:-9999px;"></svg>
@@ -312,6 +329,133 @@
     });
 
     renderCases();
+
+    // ---- 点列化の新旧比較 ---------------------------------------------------
+    //
+    // 「旧方式を残したまま、劣化がないことを確かめてから切り替える」ための検証。
+    // 同じパスに両方式を掛け、形状のずれ（双方向の最大距離）・点数・時間を出す。
+    // 見出しの数値だけでなく、ずれが大きい順にパスを並べて個別に確認できるようにする。
+
+    /** 点 p から線分 ab までの距離。 */
+    function pointSegDist(p, a, b) {
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const len2 = dx * dx + dy * dy;
+      if (len2 === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+      let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2;
+      t = Math.max(0, Math.min(1, t));
+      return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+    }
+
+    /** 点列 pts の各点から折れ線 poly までの距離の最大（片方向のハウスドルフ距離）。 */
+    function maxDistToPolyline(pts, poly) {
+      if (poly.length < 2) return Infinity;
+      // 折れ線の各線分に対する最小距離を取る。パス長が大きいので、直前に最も近かった
+      // 区間の周辺から探し始めて全探索を避ける（形が概ね一致している前提の高速化。
+      // 一致していなければ距離が大きく出るので、判定の安全側には倒れない）。
+      let worst = 0;
+      let hint = 0;
+      for (let i = 0; i < pts.length; i += 1) {
+        let best = Infinity;
+        let bestJ = hint;
+        const span = 64;
+        const from = Math.max(0, hint - span);
+        const to = Math.min(poly.length - 2, hint + span);
+        for (let j = from; j <= to; j += 1) {
+          const d = pointSegDist(pts[i], poly[j], poly[j + 1]);
+          if (d < best) { best = d; bestJ = j; }
+        }
+        // 近傍で見つからない（大きく外れている）場合だけ全探索して正確に測る
+        if (best > 1) {
+          for (let j = 0; j <= poly.length - 2; j += 1) {
+            const d = pointSegDist(pts[i], poly[j], poly[j + 1]);
+            if (d < best) { best = d; bestJ = j; }
+          }
+        }
+        hint = bestJ;
+        if (best > worst) worst = best;
+      }
+      return worst;
+    }
+
+    async function runSamplingComparison(svgText, options) {
+      const opts = options || {};
+      const step = Number(opts.step) || 1.2;
+      const tol = Number(opts.tol) || 0.05;
+      const layerIds = opts.layerIds || ["_国境界", "_州境界", "_第一分高面"];
+      const doc = new DOMParser().parseFromString(svgText, "image/svg+xml");
+      DerleLogic.setCurveTolerance(tol);
+
+      const report = { step, tol, layers: [], worst: [] };
+      for (const id of layerIds) {
+        const layer = doc.getElementById(id);
+        if (!layer) continue;
+        const paths = Array.from(layer.querySelectorAll("path"));
+        let oldPts = 0;
+        let newPts = 0;
+        let oldMs = 0;
+        let newMs = 0;
+        let fallbacks = 0;
+        let worstDev = 0;
+
+        for (const pathEl of paths) {
+          const subpaths = DerleLogic.splitPathData(pathEl.getAttribute("d") || "");
+          for (const sub of subpaths) {
+            const t0 = performance.now();
+            const a = DerleLogic.samplePathElementByLength(pathEl, step, sub);
+            const t1 = performance.now();
+            const b = DerleLogic.samplePathElementFromData(pathEl, sub);
+            const t2 = performance.now();
+            oldMs += t1 - t0;
+            newMs += t2 - t1;
+            oldPts += a.length;
+            if (!b) { fallbacks += 1; continue; }
+            newPts += b.length;
+            const dev = Math.max(maxDistToPolyline(b, a), maxDistToPolyline(a, b));
+            if (dev > worstDev) worstDev = dev;
+            report.worst.push({ layer: id, dev, oldN: a.length, newN: b.length });
+          }
+        }
+        report.layers.push({
+          id, paths: paths.length, oldPts, newPts, oldMs, newMs, fallbacks, worstDev,
+        });
+        await DerleLogic.nextFrame();
+      }
+      report.worst.sort((p, q) => q.dev - p.dev);
+      report.worst = report.worst.slice(0, 10);
+      return report;
+    }
+    window.runSamplingComparison = runSamplingComparison;
+
+    const cmpFile = document.getElementById("cmpFile");
+    const cmpOut = document.getElementById("cmpOut");
+    document.getElementById("cmpRun").addEventListener("click", async () => {
+      const file = cmpFile.files && cmpFile.files[0];
+      if (!file) { cmpOut.textContent = "SVG を選んでください。"; return; }
+      cmpOut.textContent = "比較中…（旧方式は数分かかります）";
+      const text = await file.text();
+      const r = await runSamplingComparison(text, {
+        step: Number(document.getElementById("cmpStep").value),
+        tol: Number(document.getElementById("cmpTol").value),
+      });
+      const lines = [`間引き間隔 ${r.step} / 曲線許容差 ${r.tol}`, ""];
+      for (const L of r.layers) {
+        lines.push(
+          `${L.id}: path ${L.paths} 本`,
+          `  旧: ${L.oldPts} 点 / ${(L.oldMs / 1000).toFixed(2)} 秒`,
+          `  新: ${L.newPts} 点 / ${(L.newMs / 1000).toFixed(3)} 秒` +
+            (L.fallbacks ? `（旧方式へ退避 ${L.fallbacks} 本）` : ""),
+          `  倍率: ${(L.oldMs / Math.max(L.newMs, 1e-6)).toFixed(0)} 倍速 / 点数比 ${(L.newPts / Math.max(L.oldPts, 1)).toFixed(2)}`,
+          `  形状の最大ずれ: ${L.worstDev.toFixed(4)} 地図単位`,
+          ""
+        );
+      }
+      lines.push("ずれが大きいサブパス上位:");
+      for (const w of r.worst) {
+        lines.push(`  ${w.layer}: ${w.dev.toFixed(4)} （旧 ${w.oldN} 点 → 新 ${w.newN} 点）`);
+      }
+      cmpOut.textContent = lines.join("\n");
+    });
   </script>
 </body>
 </html>
