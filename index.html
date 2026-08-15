@@ -406,6 +406,7 @@
     };
     let buildGraphInProgress = false;
     let exportInProgress = false;
+    let extractInProgress = false;
 
     const layerDefs = [
       { id: "_海", label: "海" },
@@ -722,11 +723,6 @@
       };
     }
 
-    function splitPathData(d) {
-      if (!d) return [];
-      return d.trim().split(/(?=[Mm])/).map((part) => part.trim()).filter(Boolean);
-    }
-
     function applyTransform(point, element) {
       if (!el.measureSvg) return { x: point.x, y: point.y };
       const ctm = element.getCTM();
@@ -738,23 +734,13 @@
       return { x: out.x, y: out.y };
     }
 
-    function samplePathElement(pathEl, step, pathDataOverride) {
-      if (!el.measureSvg) return [];
-      const clone = pathEl.cloneNode(true);
-      if (pathDataOverride) {
-        clone.setAttribute("d", pathDataOverride);
-      }
-      el.measureSvg.appendChild(clone);
-      const length = clone.getTotalLength();
-      const count = Math.max(2, Math.ceil(length / step));
-      const points = [];
-      for (let i = 0; i <= count; i += 1) {
-        const raw = clone.getPointAtLength((length * i) / count);
-        points.push(applyTransform(raw, clone));
-      }
-      el.measureSvg.removeChild(clone);
-      return points;
-    }
+    // パスの点列化と `d` のサブパス分割は logic.js のものを使う。ここに写しを置くと
+    // 片方だけ直したときに食い違う（実際 splitPathData でそれが起きた）。とくに点列化は
+    // getPointAtLength を使う旧方式のままだったため、Wikipedia風出力の陸地取得だけが
+    // 81 秒かかっていた（logic.js 側は `d` を直接読む方式に置き換わっている）。
+    const splitPathData = (d) => DerleLogic.splitPathData(d);
+    const samplePathElement = (pathEl, step, pathDataOverride) =>
+      DerleLogic.samplePathElement(pathEl, step, pathDataOverride);
 
     function samplePolylineElement(polyEl) {
       if (!el.measureSvg) return [];
@@ -808,6 +794,10 @@
       return output;
     }
 
+    // 潰れた小さい島を打ち直すときの最小弦長。実質「下限なし」だが正の値にしてある
+    // （0 だと、点数を長さ÷step で決める旧方式の経路が発散する）。
+    const LAND_RETRY_STEP = 0.01;
+
     function getLandSampleStep() {
       const base = el.sampleStep ? Number(el.sampleStep.value) : 1.2;
       if (!Number.isFinite(base) || base <= 0) return 3;
@@ -837,7 +827,13 @@
           const d = item.getAttribute("d") || "";
           const subpaths = splitPathData(d);
           subpaths.forEach((subpath) => {
-            const points = cleanPathPoints(samplePathElement(item, step, subpath));
+            let points = cleanPathPoints(samplePathElement(item, step, subpath));
+            if (points.length < 3) {
+              // 小さい島は、輪郭全体が最小弦長より短いと 2 点以下に潰れて丸ごと消える。
+              // 面として描けることのほうが点の粗さより大事なので、細かく打ち直す。
+              // 0 は渡せない（弧を含むパスが落ちる旧方式の経路で、点数が発散する）。
+              points = cleanPathPoints(samplePathElement(item, LAND_RETRY_STEP, subpath));
+            }
             if (points.length < 3) return;
             const vectors = points.map((pt) => mapPointToVector(pt, vb)).filter(Boolean);
             if (vectors.length >= 3) {
@@ -2474,106 +2470,132 @@
       }
     }
 
-    function extractPolygons() {
+    // 抽出は段階ごとに区切って進捗を出す。合計 0.6 秒ほどだが、一息に回すと
+    // その間ボタンも状態表示も固まって「落ちた」ように見えるため（グラフ構築と同じ流儀）。
+    async function extractPolygons() {
       if (!state.graph) {
         setStatus("先にグラフを構築してください。");
         return;
       }
-
-      const minArea = 0;
-      const result = DerleLogic.extractPolygonsFromGraph(state.graph, minArea);
-      if (result.polygons.length === 0 && result.outerFaces.length === 0) {
-        setStatus("多角形が見つかりません。間引き設定を調整するか海岸線を有効にしてください。");
+      if (extractInProgress) {
+        setStatus("多角形を抽出中です。完了を待ってください。");
         return;
       }
+      extractInProgress = true;
+      el.extractBtn.disabled = true;
+      const step = async (label) => {
+        setStatus(`多角形を抽出中...\n${label}`);
+        await DerleLogic.nextFrame();
+      };
+      try {
+        await step("面を探索中...");
+        const minArea = 0;
+        const result = DerleLogic.extractPolygonsFromGraph(state.graph, minArea);
+        if (result.polygons.length === 0 && result.outerFaces.length === 0) {
+          setStatus("多角形が見つかりません。間引き設定を調整するか海岸線を有効にしてください。");
+          return;
+        }
 
-      state.polygons = result.polygons.map((face, idx) => {
-        return {
-          id: idx + 1,
-          area: face.area,
-          points: face.points,
-          fill: randomFill(idx + 1),
-        };
-      });
-      state.polygonsById = new Map(state.polygons.map((poly) => [String(poly.id), poly]));
-
-      clearOverlays();
-      state.polygonEdgeIndex = null;
-      state.polygonTypes.clear();
-      state.polygonEdgeIndex = buildPolygonEdgeIndex(state.polygons, state.graph);
-      let coastInfo = null;
-      if (state.rawCoastSegments && state.rawCoastSegments.length) {
-        const snap = Number.isFinite(state.buildSnapTolerance)
-          ? state.buildSnapTolerance
-          : Number(el.snapTolerance.value);
-        const tolerance = Math.max(GEOM_EPS, snap * 0.1);
-        const polygonData = buildPolygonData(state.polygons, state.graph.points);
-        const coastInsidePolygons = collectCoastInsidePolygons(
-          state.rawCoastSegments,
-          polygonData,
-          state.graph.points,
-          tolerance,
-        );
-        coastInfo = {
-          borderCoastPoints: state.borderCoastPointIndices || new Set(),
-          coastInsidePolygons,
-        };
-      }
-      if (state.polygonEdgeIndex) {
-        state.polygonTypes = classifyPolygons(
-          state.polygons,
-          state.graph,
-          state.polygonEdgeIndex.edgeSources,
-          state.sharedSeaInfo,
-          coastInfo,
-        );
-      }
-      // 領有関係（要件定義書 §6.3）: 国境線に囲まれた島は、その領域が領有する。
-      // 種別が確定していないと「領有する側になれるか」を判定できないので、分類の直後に求める。
-      //   state.polygonParents … ポリゴン id → それを内包する最小の面の id（幾何的な包含）
-      //   state.polygonOwners  … ポリゴン id → 領有する面の id（親の種別が領有する側のときだけ）
-      {
-        const typeList = state.polygons.map(
-          (p) => state.polygonTypes.get(String(p.id)) || "不明",
-        );
-        const ownership = DerleLogic.computeOwnership(
-          state.polygons,
-          state.graph.points,
-          typeList,
-        );
-        state.polygonParents = new Map();
-        state.polygonOwners = new Map();
-        state.polygons.forEach((p, i) => {
-          const parent = ownership.parents[i];
-          const owner = ownership.owners[i];
-          if (parent !== -1) {
-            state.polygonParents.set(String(p.id), String(state.polygons[parent].id));
-          }
-          if (owner !== -1) {
-            state.polygonOwners.set(String(p.id), String(state.polygons[owner].id));
-          }
+        state.polygons = result.polygons.map((face, idx) => {
+          return {
+            id: idx + 1,
+            area: face.area,
+            points: face.points,
+            fill: randomFill(idx + 1),
+          };
         });
+        state.polygonsById = new Map(state.polygons.map((poly) => [String(poly.id), poly]));
+
+        clearOverlays();
+        state.polygonEdgeIndex = null;
+        state.polygonTypes.clear();
+        await step(`面の索引を作成中... (${state.polygons.length}面)`);
+        state.polygonEdgeIndex = buildPolygonEdgeIndex(state.polygons, state.graph);
+        let coastInfo = null;
+        if (state.rawCoastSegments && state.rawCoastSegments.length) {
+          await step("海岸線の内外を判定中...");
+          const snap = Number.isFinite(state.buildSnapTolerance)
+            ? state.buildSnapTolerance
+            : Number(el.snapTolerance.value);
+          const tolerance = Math.max(GEOM_EPS, snap * 0.1);
+          const polygonData = buildPolygonData(state.polygons, state.graph.points);
+          const coastInsidePolygons = collectCoastInsidePolygons(
+            state.rawCoastSegments,
+            polygonData,
+            state.graph.points,
+            tolerance,
+          );
+          coastInfo = {
+            borderCoastPoints: state.borderCoastPointIndices || new Set(),
+            coastInsidePolygons,
+          };
+        }
+        if (state.polygonEdgeIndex) {
+          await step("国タイプを判定中...");
+          state.polygonTypes = classifyPolygons(
+            state.polygons,
+            state.graph,
+            state.polygonEdgeIndex.edgeSources,
+            state.sharedSeaInfo,
+            coastInfo,
+          );
+        }
+        // 領有関係（要件定義書 §6.3）: 国境線に囲まれた島は、その領域が領有する。
+        // 種別が確定していないと「領有する側になれるか」を判定できないので、分類の直後に求める。
+        //   state.polygonParents … ポリゴン id → それを内包する最小の面の id（幾何的な包含）
+        //   state.polygonOwners  … ポリゴン id → 領有する面の id（親の種別が領有する側のときだけ）
+        await step("領有関係を解析中...");
+        {
+          const typeList = state.polygons.map(
+            (p) => state.polygonTypes.get(String(p.id)) || "不明",
+          );
+          const ownership = DerleLogic.computeOwnership(
+            state.polygons,
+            state.graph.points,
+            typeList,
+          );
+          state.polygonParents = new Map();
+          state.polygonOwners = new Map();
+          state.polygons.forEach((p, i) => {
+            const parent = ownership.parents[i];
+            const owner = ownership.owners[i];
+            if (parent !== -1) {
+              state.polygonParents.set(String(p.id), String(state.polygons[parent].id));
+            }
+            if (owner !== -1) {
+              state.polygonOwners.set(String(p.id), String(state.polygons[owner].id));
+            }
+          });
+        }
+
+        await step("球面出力の下ごしらえ中...");
+        buildWikipediaCache();
+
+        await step("重ね表示を描画中...");
+        drawEdges();
+        drawPolygons();
+        drawPoints();
+        scheduleWikipediaUpdate(true);
+
+        const ownedCount = state.polygonOwners.size;
+        const outerCount = result.outerFaces.length;
+        const outerMessage = outerCount === 0
+          ? "外側の面が見つかりませんでした。"
+          : outerCount === 1
+            ? `外側の面を除外しました: 面積 ${result.outerFaces[0].area.toFixed(2)}`
+            : `外側の面を除外しました: ${outerCount}面`;
+
+        setStatus([
+          `多角形を抽出しました: ${state.polygons.length}`,
+          outerMessage,
+          `領有関係: ${ownedCount}面が他の領域に領有されています`,
+        ].join("\n"));
+      } catch (error) {
+        setStatus(`多角形の抽出に失敗しました: ${error.message}`);
+      } finally {
+        extractInProgress = false;
+        el.extractBtn.disabled = false;
       }
-
-      buildWikipediaCache();
-      drawEdges();
-      drawPolygons();
-      drawPoints();
-      scheduleWikipediaUpdate(true);
-
-      const ownedCount = state.polygonOwners.size;
-      const outerCount = result.outerFaces.length;
-      const outerMessage = outerCount === 0
-        ? "外側の面が見つかりませんでした。"
-        : outerCount === 1
-          ? `外側の面を除外しました: 面積 ${result.outerFaces[0].area.toFixed(2)}`
-          : `外側の面を除外しました: ${outerCount}面`;
-
-      setStatus([
-        `多角形を抽出しました: ${state.polygons.length}`,
-        outerMessage,
-        `領有関係: ${ownedCount}面が他の領域に領有されています`,
-      ].join("\n"));
     }
 
     function drawEdges() {
@@ -2788,7 +2810,7 @@
       try {
         await buildGraph();
         if (!state.graph) throw new Error("グラフを構築できませんでした");
-        extractPolygons();
+        await extractPolygons();
         if (!state.polygons.length) throw new Error("多角形が1つも取れませんでした");
         return snapshotExtraction();
       } finally {
