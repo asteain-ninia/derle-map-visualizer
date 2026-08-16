@@ -1161,22 +1161,22 @@
             if (seen.has(ei)) continue;
             seen.add(ei);
             const e = edges[ei];
-            // 端点を共有する辺は「交差」ではない（橋の根元と先で必ず触れるため）
-            if (e.a === ti || e.b === ti || e.a === tj || e.b === tj) continue;
             const ea = points[e.a];
             const eb = points[e.b];
-            if (properlyCrosses(p1, p2, ea, eb)) return true;
-            // 「真の交差」にはならないが平面性を壊す形も弾く:
-            //   ・橋が既存の頂点を途中で踏む（その頂点にノードが無いまま辺が重なる）
-            //   ・橋と既存辺が共線で正の長さぶん重なる（橋が既存辺の内側に収まる場合を含む）
+            const shared = e.a === ti || e.b === ti || e.a === tj || e.b === tj;
+            // 端点を共有する辺は「真の交差」にはならない（橋の根元と先で必ず触れるため）。
+            // ただし**免除してよいのは交差判定だけ**。共有していても、橋がその辺を
+            // なぞって既存の頂点を途中で踏むことがある。
+            //   例: 点 (0,0)(1,0)(5,0)、既存辺 0-1、橋 0→(5,0)
+            //   → 橋は辺 0-1 に重なり点 (1,0) を踏むが、端点 0 を共有しているので
+            //     以前は素通りしていた（外部レビュー指摘）。
+            if (!shared && properlyCrosses(p1, p2, ea, eb)) return true;
+            // 「真の交差」にはならないが平面性を壊す形。どちらかの端点が相手の
+            // 線分の内側（両端を除く）に乗っていれば、そこにノードが無いまま辺が重なる。
             if (pointOnOpenSegment(ea, p1, p2, COLLINEAR_EPS)) return true;
             if (pointOnOpenSegment(eb, p1, p2, COLLINEAR_EPS)) return true;
-            if (
-              pointOnOpenSegment(p1, ea, eb, COLLINEAR_EPS) &&
-              pointOnOpenSegment(p2, ea, eb, COLLINEAR_EPS)
-            ) {
-              return true;
-            }
+            if (pointOnOpenSegment(p1, ea, eb, COLLINEAR_EPS)) return true;
+            if (pointOnOpenSegment(p2, ea, eb, COLLINEAR_EPS)) return true;
           }
         }
       }

@@ -428,6 +428,10 @@
       polygonPaths: new Map(),
       polygonEdgeIndex: null,
       polygonTypes: new Map(),
+      // SVG を読み込むたびに進む世代番号。長い処理が await から戻ったとき、
+      // その間に別の SVG が読み込まれていないかをこれで確かめる
+      revision: 0,
+      bridges: [],
       // 包含・領有はいずれも「面 id → 面 id」。抽出時に埋まる（詳細は extractPolygons のコメント）
       polygonParents: new Map(),
       polygonOwners: new Map(),
@@ -459,6 +463,14 @@
     let buildGraphInProgress = false;
     let exportInProgress = false;
     let extractInProgress = false;
+
+    /** 待っているあいだに別の SVG が読み込まれたときに投げる（失敗ではなく中断）。 */
+    class StaleRevisionError extends Error {
+      constructor() {
+        super("読み込まれた SVG が変わったため中断しました");
+        this.name = "StaleRevisionError";
+      }
+    }
 
     const layerDefs = [
       { id: "_海", label: "海" },
@@ -2352,6 +2364,25 @@
         throw new Error("Invalid SVG file.");
       }
 
+      // 別の SVG を読み込んだら、前の SVG から作った派生データは全部無効になる。
+      // 消さずに残すと、新しい図に対して古いグラフのまま「多角形を抽出」できてしまう。
+      // 世代番号も進め、進行中のグラフ構築・抽出・書き出しが await から戻ったときに
+      // 自分が古い世代だと気づいて中断できるようにする。
+      state.revision += 1;
+      state.graph = null;
+      state.polygons = [];
+      state.polygonsById = new Map();
+      state.polygonEdgeIndex = null;
+      state.polygonTypes = new Map();
+      state.polygonParents = new Map();
+      state.polygonOwners = new Map();
+      state.polygonLabels = new Map();
+      state.sharedSeaInfo = null;
+      state.rawCoastSegments = [];
+      state.borderCoastPointIndices = new Set();
+      state.buildSnapTolerance = null;
+      state.bridges = [];
+
       state.svgText = text;
       state.svgDoc = doc;
       state.dashedClasses = collectDashedClasses(svg);
@@ -2519,7 +2550,10 @@
       el.extractBtn.disabled = true;
       el.exportBtn.disabled = true;
 
+      const revision = state.revision;
       const updateProgress = (phase, done, total, extra) => {
+        // 待っているあいだに別の SVG が読み込まれていたら、その時点で降りる
+        if (state.revision !== revision) throw new StaleRevisionError();
         const progress = formatProgress(done, total);
         setBuildStatus([phase, progress, extra]);
       };
@@ -2687,7 +2721,14 @@
           coastMessage,
         ].join("\n"));
       } catch (error) {
-        setStatus(`グラフ構築に失敗しました: ${error.message}`);
+        // 落ちたまま state.graph に半端なものを残さない（抽出が古い形で走るため）
+        state.graph = null;
+        setStatus(
+          error instanceof StaleRevisionError
+            ? "別の SVG が読み込まれたため、グラフ構築を中断しました。"
+            : `グラフ構築に失敗しました: ${error.message}`,
+        );
+        throw error;
       } finally {
         buildGraphInProgress = false;
         el.buildGraphBtn.disabled = false;
@@ -2709,17 +2750,22 @@
       }
       extractInProgress = true;
       el.extractBtn.disabled = true;
+      el.buildGraphBtn.disabled = true;
+      el.exportBtn.disabled = true;
+      const revision = state.revision;
       const step = async (label) => {
         setStatus(`多角形を抽出中...\n${label}`);
         await DerleLogic.nextFrame();
+        // 待っているあいだに別の SVG が読み込まれていたら、
+        // 古いグラフの結果を新しい図へ書き戻さずに降りる
+        if (state.revision !== revision) throw new StaleRevisionError();
       };
       try {
         await step("面を探索中...");
         const minArea = 0;
         const result = DerleLogic.extractPolygonsFromGraph(state.graph, minArea);
         if (result.polygons.length === 0 && result.outerFaces.length === 0) {
-          setStatus("多角形が見つかりません。間引き設定を調整するか海岸線を有効にしてください。");
-          return;
+          throw new Error("多角形が見つかりません。間引き設定を調整するか海岸線を有効にしてください。");
         }
 
         state.polygons = result.polygons.map((face, idx) => {
@@ -2820,10 +2866,19 @@
           `領有関係: ${ownedCount}面が他の領域に領有されています`,
         ].join("\n"));
       } catch (error) {
-        setStatus(`多角形の抽出に失敗しました: ${error.message}`);
+        // 途中で落ちた state（種別が空・領有が前回のまま等）を「成功」として
+        // 書き出し側へ渡さないよう、呼び出し元へ投げ直す。
+        setStatus(
+          error instanceof StaleRevisionError
+            ? "別の SVG が読み込まれたため、多角形の抽出を中断しました。"
+            : `多角形の抽出に失敗しました: ${error.message}`,
+        );
+        throw error;
       } finally {
         extractInProgress = false;
         el.extractBtn.disabled = false;
+        el.buildGraphBtn.disabled = false;
+        el.exportBtn.disabled = false;
       }
     }
 
@@ -3126,8 +3181,12 @@
       }
     });
 
-    el.buildGraphBtn.addEventListener("click", buildGraph);
-    el.extractBtn.addEventListener("click", extractPolygons);
+    // buildGraph / extractPolygons は失敗を呼び出し元へ投げる（書き出しが半端な state を
+    // 掴まないようにするため）。ボタンから直接押したときは、状態表示はすでに出ているので
+    // ここで受け止めて握りつぶす。
+    const runFromButton = (fn) => () => { fn().catch(() => {}); };
+    el.buildGraphBtn.addEventListener("click", runFromButton(buildGraph));
+    el.extractBtn.addEventListener("click", runFromButton(extractPolygons));
     el.exportBtn.addEventListener("click", exportGimoza);
     el.clearBtn.addEventListener("click", () => {
       clearOverlays();

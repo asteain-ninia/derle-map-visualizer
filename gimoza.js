@@ -2438,20 +2438,21 @@
     };
   }
 
-  // --- 9. 間引き版の収束ループ ------------------------------------------------
+  // --- 9. 整合性が取れるまで組み直すループ ------------------------------------
   /**
-   * 目標頂点数を指定した間引き版の manifest を、整合性が取れるまで組み直して返す。
+   * manifest を、整合性が取れるまで組み直して返す。**フル版・間引き版の両方が通る。**
    *
-   * 間引きは各リングを独立に動かすので、まれに穴が親からはみ出したり、隣の面と
-   * 重なったりする。どの面がそうなるかは幾何次第で事前に読めないため、
+   * 頂点を動かす処理 (フル版の冗長点除去も、目標頂点数を指定した間引きも) は各リングを
+   * 独立に動かすので、まれに穴が親からはみ出したり、隣の面と重なったりする。どの面が
+   * そうなるかは幾何次第で事前に読めないため、
    *   組み立て → 自前チェック → 落ちた面を keepFullIds へ追加 → 組み立て直し
    * を繰り返す。keepFullIds に入った面はその面だけ原型解像度に戻る (局所的な
    * 間引き解除) ので、頂点数はほとんど増えないまま不整合だけが消える。
    *
-   * 上限まで回っても消えない場合は、最後に作ったものをそのまま返す (書き出せない
-   * よりは書き出して、進捗メッセージで残った件数を伝えるほうがよい)。
+   * 返り値は { manifest, converged, violations }。収束しなかったものを書き出すかどうかは
+   * 呼び出し側が決める (exportGimoza は投げる)。
    */
-  function buildSimplifiedManifest(input, opts) {
+  function buildCheckedManifest(input, opts) {
     const progress = typeof opts.onProgress === "function" ? opts.onProgress : () => {};
     const log = typeof opts.log === "function" ? opts.log : () => {};
     const keepFullIds = new Set(opts.keepFullIds ?? []);
@@ -2500,22 +2501,21 @@
   async function exportGimoza(input) {
     const opts = input.options || {};
     const worldRect = opts.worldRect || worldRectFromSvg(input.svgDoc);
-    let manifest;
-    if (opts.targetVertices == null) {
-      manifest = buildManifest({ ...input, options: { ...opts, worldRect } });
-    } else {
-      const result = buildSimplifiedManifest(input, { ...opts, worldRect });
-      // 収束しなかったものを黙って返してはいけない。アプリが読み込みで落とすデータを
-      // 「書き出しました」とだけ告げることになる (外部レビュー指摘)。
-      if (!result.converged) {
-        const kinds = [...new Set(result.violations.map((v) => v.kind))].join(" / ");
-        throw new Error(
-          `間引きが整合性を満たすところまで収束しませんでした (残り ${result.violations.length} 件: ${kinds})。` +
-            `目標頂点数を大きくするか、空欄にしてフル版を書き出してください。`,
-        );
-      }
-      manifest = result.manifest;
+    // フル版も冗長点の除去で頂点を動かすので、間引き版と同じく整合性を確かめてから出す
+    // (以前はフル版だけ素通りだった。外部レビュー指摘)。
+    const result = buildCheckedManifest(input, { ...opts, worldRect });
+    // 収束しなかったものを黙って返してはいけない。アプリが読み込みで落とすデータを
+    // 「書き出しました」とだけ告げることになる。
+    if (!result.converged) {
+      const kinds = [...new Set(result.violations.map((v) => v.kind))].join(" / ");
+      const hint = opts.targetVertices == null
+        ? "冗長点の除去の許容値 (cleanupEpsilon) を小さくしてください。"
+        : "目標頂点数を大きくするか、空欄にしてフル版を書き出してください。";
+      throw new Error(
+        `整合性を満たすところまで収束しませんでした (残り ${result.violations.length} 件: ${kinds})。${hint}`,
+      );
     }
+    const manifest = result.manifest;
     const encoder = new TextEncoder();
     const baseMapAsset =
       input.baseMapAsset ?? encoder.encode(JSON.stringify(extractVectorBaseMap(input.svgDoc, worldRect)));
@@ -2531,7 +2531,7 @@
     extractVectorBaseMap,
     worldRectFromSvg,
     buildManifest,
-    buildSimplifiedManifest,
+    buildCheckedManifest,
     checkManifestConsistency,
     exportGimoza,
     assignLabelsToPolygons,
