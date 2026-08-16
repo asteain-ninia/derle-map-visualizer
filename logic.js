@@ -17,6 +17,30 @@
     return d.trim().split(/(?=[Mm])/).map((part) => part.trim()).filter(Boolean);
   }
 
+  /**
+   * レイヤー内に「2 つ目以降のサブパスが相対 `m` で始まる `d`」がいくつあるかを数える。
+   *
+   * サブパスは単独の点列として扱うが、SVG では **パスの最初の `m` は絶対 `M` として
+   * 解釈される**。そのため相対 `m` で始まる 2 つ目以降のサブパスを切り出すと、本来
+   * 「直前のサブパスの終点からの相対」だった始点が原点からの絶対座標に化け、**エラーも
+   * 警告も出ないまま図形だけが移動する**。
+   *
+   * 現在の原図は全サブパスが絶対 `M` なので実害は無い（実測 0 件）。Illustrator の
+   * 書き出し設定が変わった日に無症状で発症する種類の問題なので、数えて表に出す。
+   */
+  function countRelativeSubpathStarts(layerEl) {
+    if (!layerEl) return 0;
+    let count = 0;
+    const paths = layerEl.querySelectorAll("path");
+    for (let i = 0; i < paths.length; i += 1) {
+      const parts = splitPathData(paths[i].getAttribute("d") || "");
+      for (let k = 1; k < parts.length; k += 1) {
+        if (parts[k].charCodeAt(0) === 109) count += 1; // 'm'
+      }
+    }
+    return count;
+  }
+
   function applyTransform(point, element) {
     if (!measureSvg) return { x: point.x, y: point.y };
     const ctm = element.getCTM();
@@ -1510,6 +1534,7 @@
     samplePathElementFromData,
     pathDataToPoints,
     splitPathData,
+    countRelativeSubpathStarts,
     // 領有関係（要件定義書 §6.3）
     computeOwnership,
     computeContainment,

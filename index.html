@@ -764,15 +764,23 @@
       });
     }
 
-    function clearOverlays() {
+    /**
+     * 重ね描きを消す。`keepSelection` を立てると選択だけ残す。
+     * 表示チェックボックスの切替は「描き直し」であって「選択の解除」ではないので、
+     * そこで選択と面積表示まで消えると、国を選んで面積を見た直後に点表示を触った
+     * だけで全部やり直しになる。
+     */
+    function clearOverlays(keepSelection) {
       if (!state.overlaySvg) return;
       state.overlaySvg.innerHTML = "";
       state.polygonsGroup = null;
       state.polygonPaths.clear();
-      state.selectedPolygons.clear();
+      if (!keepSelection) {
+        state.selectedPolygons.clear();
+        if (el.areaGroup) el.areaGroup.style.display = "none";
+      }
       state.selectionOverlay = null;
       state.selectionBoundary = null;
-      if (el.areaGroup) el.areaGroup.style.display = "none";
     }
 
     function parseViewBox(viewBox) {
@@ -1039,7 +1047,9 @@
         } else {
           ctx.setTransform(scl, 0, 0, scl, -minX * scl, -minY * scl);
         }
-        ctx.fill(new Path2D(d));
+        // Wikipedia風出力の陸地は evenodd で塗っている。ここを既定の nonzero のままに
+        // すると、湖や穴のある陸地で「見えている陸」と「面積として数える陸」がずれる。
+        ctx.fill(new Path2D(d), "evenodd");
         ctx.restore();
       });
       return true;
@@ -1782,6 +1792,12 @@
       const blob = new Blob([svg], { type: "image/svg+xml" });
       const url = URL.createObjectURL(blob);
       const img = new Image();
+      // 失敗しても黙って終わらないようにする。9600px だとキャンバスは RGBA で約 350MB
+      // になり、環境によっては toBlob が null を返す（何も起きないので原因が分からない）。
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        setStatus("PNG の書き出しに失敗しました（画像を読み込めませんでした）。");
+      };
       img.onload = () => {
         const canvas = document.createElement("canvas");
         canvas.width = size;
@@ -1790,7 +1806,11 @@
         ctx.clearRect(0, 0, size, size);
         ctx.drawImage(img, 0, 0, size, size);
         canvas.toBlob((pngBlob) => {
-          if (!pngBlob) return;
+          if (!pngBlob) {
+            URL.revokeObjectURL(url);
+            setStatus(`PNG の書き出しに失敗しました。出力サイズ ${size}px が大きすぎる可能性があります。`);
+            return;
+          }
           const pngUrl = URL.createObjectURL(pngBlob);
           const link = document.createElement("a");
           link.href = pngUrl;
@@ -2296,7 +2316,11 @@
           const dashValue = extractStyleValue(body, "stroke-dasharray");
           if (!hasDashValue(dashValue)) continue;
           selectors.split(",").forEach((selector) => {
-            const classMatches = selector.match(/\\.([_a-zA-Z0-9-]+)/g);
+            // `\\.` だと「バックスラッシュ + 任意の 1 文字」を探すことになり、
+            // `.cls-21` のようなセレクタには決して一致しない。原図の点線は 6 件とも
+            // <style> のクラス規則で指定されているので、この 1 文字のせいで点線クラスの
+            // 収集が常に空になり、「点線スナップ倍率」が一度も効いていなかった。
+            const classMatches = selector.match(/\.([_a-zA-Z0-9-]+)/g);
             if (!classMatches) return;
             classMatches.forEach((cls) => dashed.add(cls.slice(1)));
           });
@@ -2712,6 +2736,16 @@
           ? `橋渡し: ${bridgeResult.bridges.length}箇所（交差のため棄却: ${bridgeResult.rejected}箇所）`
           : "橋渡し: 無効";
 
+        // 相対 m で始まるサブパスは、単独で切り出すと座標が黙って移動する（logic.js の
+        // countRelativeSubpathStarts のコメント参照）。今の原図には無いが、書き出し設定が
+        // 変わったときに無症状で発症するので、見つけたら必ず表に出す。
+        const relativeStarts =
+          DerleLogic.countRelativeSubpathStarts(borderLayer) +
+          (coastLayer ? DerleLogic.countRelativeSubpathStarts(coastLayer) : 0);
+        const relativeMessage = relativeStarts > 0
+          ? `⚠ 相対 m で始まるサブパスが ${relativeStarts} 件あります。その形の座標がずれている可能性があります。`
+          : null;
+
         setStatus([
           `グラフを構築しました。`,
           `点: ${graph.points.length}`,
@@ -2719,7 +2753,8 @@
           `線分: ${finalSegments.length}`,
           bridgeMessage,
           coastMessage,
-        ].join("\n"));
+          relativeMessage,
+        ].filter(Boolean).join("\n"));
       } catch (error) {
         // 落ちたまま state.graph に半端なものを残さない（抽出が古い形で走るため）
         state.graph = null;
@@ -3221,10 +3256,11 @@
 
     [el.showEdges, el.showPolys, el.showPoints].forEach((checkbox) => {
       checkbox.addEventListener("change", () => {
-        clearOverlays();
+        clearOverlays(true);
         drawEdges();
         drawPolygons();
         drawPoints();
+        updateSelectionDisplay();
       });
     });
 
