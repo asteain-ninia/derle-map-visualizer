@@ -792,6 +792,42 @@
     return { polygons, outerFaces };
   }
 
+  // ---- 経度180度の継ぎ目（地図の西端・東端）----
+  // frame: 正距円筒図法で経度-180〜+180・緯度+90〜-90に対応する矩形 {x, y, width, height}
+
+  // 点が地図枠の西端/東端のどちらに乗っているか（tol以内）。"W" / "E" / null
+  function seamSideOf(point, frame, tol) {
+    if (!point || !frame) return null;
+    if (Math.abs(point.x - frame.x) <= tol) return "W";
+    if (Math.abs(point.x - (frame.x + frame.width)) <= tol) return "E";
+    return null;
+  }
+
+  // 西端/東端からtol以内の点のxを枠の端ちょうどに揃える（pointsを直接書き換える）。揃えた点数を返す。
+  // indicesを渡すとその点だけを対象にする。
+  function snapPointsToSeam(points, frame, tol, indices) {
+    if (!points || !frame || !(tol >= 0)) return 0;
+    const west = frame.x;
+    const east = frame.x + frame.width;
+    let count = 0;
+    const visit = (p) => {
+      if (!p) return;
+      if (Math.abs(p.x - west) <= tol) {
+        if (p.x !== west) count += 1;
+        p.x = west;
+      } else if (Math.abs(p.x - east) <= tol) {
+        if (p.x !== east) count += 1;
+        p.x = east;
+      }
+    };
+    if (indices) {
+      indices.forEach((i) => visit(points[i]));
+    } else {
+      points.forEach(visit);
+    }
+    return count;
+  }
+
   global.DerleLogic = {
     setMeasureSvg,
     nextFrame,
@@ -799,5 +835,7 @@
     splitSegmentsAtIntersections,
     buildGraphFromSegments,
     extractPolygonsFromGraph,
+    seamSideOf,
+    snapPointsToSeam,
   };
 })(window);

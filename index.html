@@ -360,6 +360,7 @@
       baseSvg: null,
       overlaySvg: null,
       viewBox: null,
+      mapFrame: null,
       graph: null,
       polygons: [],
       polygonsGroup: null,
@@ -687,10 +688,54 @@
       seaShadow: "#DDDDDD",
     };
 
-    function mapPointToVector(point, vb) {
-      if (!point || !vb) return null;
-      const lon = ((point.x - vb.x) / vb.width) * 360 - 180;
-      const lat = 90 - ((point.y - vb.y) / vb.height) * 180;
+    // 地図枠: 正距円筒図法で経度-180〜+180・緯度+90〜-90に対応する矩形。
+    // Illustrator出力ではviewBoxに余白があり、海レイヤー（_海）の矩形が実際の地図範囲になっている
+    // （例: viewBox 0..4249.288 に対し _海色 は x=5.262..4248.662, y=0.5..2122.2 で縦横比ちょうど2:1、陸の切断線もこの端に乗る）。
+    // 海の矩形が2:1かつviewBoxの大半を覆う場合はそれを採用し、見つからなければviewBoxにフォールバックする。
+    function resolveMapFrame(svgRoot, viewBoxText) {
+      const vb = parseViewBox(viewBoxText);
+      if (!vb) return null;
+      const seaLayer = svgRoot
+        ? (svgRoot.querySelector("[id='_海']") || svgRoot.querySelector("[data-name='海']"))
+        : null;
+      if (seaLayer) {
+        let best = null;
+        seaLayer.querySelectorAll("rect").forEach((rect) => {
+          const x = Number(rect.getAttribute("x")) || 0;
+          const y = Number(rect.getAttribute("y")) || 0;
+          const width = Number(rect.getAttribute("width")) || 0;
+          const height = Number(rect.getAttribute("height")) || 0;
+          if (width <= 0 || height <= 0) return;
+          if (!best || width * height > best.width * best.height) best = { x, y, width, height };
+        });
+        if (best
+          && Math.abs(best.width / best.height - 2) <= 0.02
+          && best.width >= vb.width * 0.9
+          && best.height >= vb.height * 0.9) {
+          return { ...best, source: "sea" };
+        }
+      }
+      return { ...vb, source: "viewBox" };
+    }
+
+    function getMapFrame() {
+      return state.mapFrame || parseViewBox(state.viewBox);
+    }
+
+    // 地図端（経度±180度）に乗っているとみなす距離。実データでは端の頂点が端から0.001程度の浮動小数誤差で並ぶため、
+    // それを吸収しつつ、端に斜めに近づく海岸線（端から0.1px程度の点もある）は巻き込まない値にしている。
+    function getSeamTolerance(frame) {
+      const f = frame || getMapFrame();
+      return f ? Math.max(0.05, f.width * 1e-5) : 0.05;
+    }
+
+    function mapPointToVector(point, frame) {
+      if (!point || !frame) return null;
+      const tol = getSeamTolerance(frame);
+      let lon = ((point.x - frame.x) / frame.width) * 360 - 180;
+      if (Math.abs(point.x - frame.x) <= tol) lon = -180;
+      else if (Math.abs(point.x - (frame.x + frame.width)) <= tol) lon = 180;
+      const lat = Math.max(-90, Math.min(90, 90 - ((point.y - frame.y) / frame.height) * 180));
       const lonRad = degToRad(lon);
       const latRad = degToRad(lat);
       const cosLat = Math.cos(latRad);
@@ -795,7 +840,7 @@
 
     function collectLandVectorPaths(step) {
       if (!state.baseSvg) return [];
-      const vb = parseViewBox(state.viewBox);
+      const vb = getMapFrame();
       if (!vb) return [];
       const vectorPaths = [];
 
@@ -896,7 +941,7 @@
         el.areaGroup.style.display = "none";
         return;
       }
-      const vb = parseViewBox(state.viewBox);
+      const vb = getMapFrame();
       if (!vb) { el.areaGroup.style.display = "none"; return; }
 
       const selectedPolys = [];
@@ -1008,7 +1053,7 @@
 
     function buildWikipediaCache() {
       if (!state.graph || !state.polygons.length) return false;
-      const vb = parseViewBox(state.viewBox);
+      const vb = getMapFrame();
       if (!vb) return false;
 
       const pointVectors = state.graph.points.map((pt) => mapPointToVector(pt, vb));
@@ -2063,6 +2108,7 @@
       state.svgDoc = doc;
       state.dashedClasses = collectDashedClasses(svg);
       state.viewBox = svg.getAttribute("viewBox") || `0 0 ${svg.getAttribute("width")} ${svg.getAttribute("height")}`;
+      state.mapFrame = resolveMapFrame(svg, state.viewBox);
 
       el.svgStack.innerHTML = "";
 
@@ -2087,7 +2133,11 @@
 
       buildLayerToggles();
       refreshLayerGroupControls();
-      setStatus("SVGを読み込みました。階層を選んでグラフを構築してください。");
+      const frame = state.mapFrame;
+      const frameMessage = frame
+        ? `地図枠(${frame.source === "sea" ? "_海の矩形" : "viewBox"}): x=${frame.x}..${frame.x + frame.width}, y=${frame.y}..${frame.y + frame.height}`
+        : "地図枠を決定できませんでした。";
+      setStatus(`SVGを読み込みました。階層を選んでグラフを構築してください。\n${frameMessage}`);
     }
 
     function buildLayerToggles() {
@@ -2388,6 +2438,11 @@
       }
 
       const minArea = 0;
+      // 地図端（経度±180度）付近の頂点を端ちょうどに揃える（冪等）。継ぎ目の判定と球面上の隙間防止に使う。
+      const seamFrame = getMapFrame();
+      const seamSnapped = seamFrame
+        ? DerleLogic.snapPointsToSeam(state.graph.points, seamFrame, getSeamTolerance(seamFrame))
+        : 0;
       const result = DerleLogic.extractPolygonsFromGraph(state.graph, minArea);
       if (result.polygons.length === 0 && result.outerFaces.length === 0) {
         setStatus("多角形が見つかりません。間引き設定を調整するか海岸線を有効にしてください。");
@@ -2452,6 +2507,7 @@
       setStatus([
         `多角形を抽出しました: ${state.polygons.length}`,
         outerMessage,
+        `地図端に揃えた頂点: ${seamSnapped}`,
       ].join("\n"));
     }
 
