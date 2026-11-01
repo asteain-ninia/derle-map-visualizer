@@ -1192,6 +1192,42 @@
       return inside;
     }
 
+    // 真裏の点Bの内外判定。2D地図から来た多角形は経緯度平面で閉じているので containsLonLat で判定する。
+    // 経度の巻き数が±1周の多角形（3Dで極を囲む輪。経緯度平面では閉じない）は、輪が分ける2領域のうち
+    // 面積の小さい方を内側とみなし、その側の極へ向かう経線とBからの交差回数で判定する。
+    function containsBackPoint(indices, lonArr, latArr, lon, lat) {
+      let winding = 0;
+      let capNorth = 0;
+      let prev = indices[indices.length - 1];
+      for (let i = 0; i < indices.length; i += 1) {
+        const curr = indices[i];
+        const dLon = normalizeAngle(lonArr[curr] - lonArr[prev]);
+        winding += dLon;
+        // 北極と辺の間の球面上の面積（符号付き）。
+        capNorth += dLon * (1 - Math.sin((latArr[prev] + latArr[curr]) / 2));
+        prev = curr;
+      }
+      if (Math.abs(winding) < Math.PI) {
+        return containsLonLat(indices, lonArr, latArr, lon, lat);
+      }
+      const northArea = Math.abs(capNorth);
+      const towardNorth = northArea <= 4 * Math.PI - northArea;
+      let crossings = 0;
+      prev = indices[indices.length - 1];
+      for (let i = 0; i < indices.length; i += 1) {
+        const curr = indices[i];
+        const a = normalizeAngle(lonArr[prev] - lon);
+        const b = a + normalizeAngle(lonArr[curr] - lonArr[prev]);
+        if ((a > 0) !== (b > 0)) {
+          const crossLat = latArr[prev] + (latArr[curr] - latArr[prev]) * (a / (a - b));
+          if (towardNorth ? crossLat > lat : crossLat < lat) crossings += 1;
+        }
+        prev = curr;
+      }
+      // 極側の領域の点は、極へ向かう経線が輪を偶数回横切る。
+      return crossings % 2 === 0;
+    }
+
     function normalizeAngle(angle) {
       if (angle > Math.PI) return angle - 2 * Math.PI;
       if (angle <= -Math.PI) return angle + 2 * Math.PI;
@@ -1263,7 +1299,7 @@
       if (lastExit && firstEntry) {
         pushArc(lastExit, firstEntry, crossTurns + leadCrossTurns);
       }
-      if (arcs.length && containsLonLat(indices, lonArr, latArr, back.lon, back.lat)) {
+      if (arcs.length && containsBackPoint(indices, lonArr, latArr, back.lon, back.lat)) {
         // 弧の回転角の総和の符号は、見えている外側領域を囲む向きを表す。
         // その向きの弧のうち最も長いものを逆回り（1周分戻す）にして、内外を入れ替える。
         const sign = arcs.reduce((sum, arc) => sum + horizonArcSweep(arc), 0) >= 0 ? 1 : -1;
