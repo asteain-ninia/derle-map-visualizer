@@ -1124,6 +1124,14 @@
       }
     }
 
+    // 球面出力で線を描かない地図端の辺か: 人工的な切断線（analyzeSeamのcut区間）と枠の仮想辺。
+    // 地図端に沿う国境線と、反対側が海の本物の海岸線は描く。
+    function isArtificialSeamSegment(a, b) {
+      if (!state.seam) return false;
+      const frame = getMapFrame();
+      return DerleLogic.isArtificialSeamEdge(a, b, frame, getSeamTolerance(frame), state.seam);
+    }
+
     function buildWikipediaCache() {
       if (!state.graph || !state.polygons.length) return false;
       const vb = getMapFrame();
@@ -1150,7 +1158,9 @@
 
       let coastVectors = null;
       if (state.rawCoastSegments && state.rawCoastSegments.length) {
+        // 地図端上の人工的な切断線（陸が経度180度をまたいで続く所）は海岸線として描かない。
         coastVectors = state.rawCoastSegments
+          .filter((seg) => !isArtificialSeamSegment(seg.a, seg.b))
           .map((seg) => ({ a: mapPointToVector(seg.a, vb), b: mapPointToVector(seg.b, vb) }))
           .filter((seg) => seg.a && seg.b);
       }
@@ -1577,7 +1587,8 @@
         : state.graph
           ? buildEdgePath(
             state.graph.edges,
-            (edge) => edge.sources && edge.sources.has("coast"),
+            (edge) => edge.sources && edge.sources.has("coast")
+              && !isArtificialSeamSegment(state.graph.points[edge.a], state.graph.points[edge.b]),
             rotX,
             rotY,
             rotZ,
