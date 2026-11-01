@@ -120,6 +120,8 @@
       <label><input id="toggleEndpoints" type="checkbox" />Show split endpoints</label>
     </section>
     <section id="cases" class="cases"></section>
+    <h2 style="font-size:15px;margin:8px 0 0;">経度180度の継ぎ目（合成SVG）</h2>
+    <section id="seamCases" class="cases"></section>
   </main>
 
   <svg id="measure" width="0" height="0" style="position:absolute; left:-9999px; top:-9999px;"></svg>
@@ -312,6 +314,142 @@
     });
 
     renderCases();
+  </script>
+  <script>
+    // 経度180度の継ぎ目の合成ケース。地図枠 x=0..400, y=0..200（_海の矩形）。
+    // - 島（y20–50）: 陸の切断線で西端・東端に分かれる → 1地物にまとめる
+    // - 海上国境（y80–120）: 西端に_国境界の線あり、東端は線なし（枠で閉じる）→ まとめない・国境として描く
+    // - 経度180度上の本物の海岸線（西端y140–170、東端は海）→ まとめない・海岸線として描く
+    // - 端で2回接するC字の陸（西端y175–180, 190–195）: 枠と海岸線だけで閉じる湾は面にしない
+    const SEAM_FIXTURE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-4 -4 408 208">
+      <g id="_海"><rect id="_海色" x="0" y="0" width="400" height="200" /></g>
+      <g id="_第一分高面">
+        <path d="M0 20 H30 V50 H0 Z" />
+        <path d="M370 20 H400 V50 H370 Z" />
+        <path d="M0 140 H50 V170 H0 Z" />
+        <path d="M0 175 H60 V195 H0 V190 H40 V180 H0 Z" />
+      </g>
+      <g id="_国境界">
+        <path d="M0 80 H40 V120 H0 Z" />
+        <path d="M400 80 H360 V120 H400" />
+      </g>
+    </svg>`;
+
+    async function runSeamCase() {
+      const L = DerleLogic;
+      const doc = new DOMParser().parseFromString(SEAM_FIXTURE_SVG, "image/svg+xml");
+      const rect = doc.getElementById("_海色");
+      const frame = {
+        x: Number(rect.getAttribute("x")),
+        y: Number(rect.getAttribute("y")),
+        width: Number(rect.getAttribute("width")),
+        height: Number(rect.getAttribute("height")),
+      };
+      const tol = 0.05;
+      const snap = 0.5;
+      const step = 1;
+      const coast = await L.extractSegmentsFromLayer(doc.getElementById("_第一分高面"), step, "coast");
+      const border = await L.extractSegmentsFromLayer(doc.getElementById("_国境界"), step, "border");
+      const segments = await L.splitSegmentsAtIntersections(coast.concat(border), 4, snap);
+      const graph = await L.buildGraphFromSegments(segments, snap);
+      L.snapPointsToSeam(graph.points, frame, tol);
+      const frameEdges = L.addSeamFrameEdges(graph, frame, tol);
+      const frameEdgesAgain = L.addSeamFrameEdges(graph, frame, tol);
+      const faces = L.extractPolygonsFromGraph(graph, 0).polygons;
+      const sources = new Map(graph.edges.map((e) => [e.a < e.b ? `${e.a}-${e.b}` : `${e.b}-${e.a}`, e.sources]));
+      const getSources = (a, b) => sources.get(a < b ? `${a}-${b}` : `${b}-${a}`);
+      const pieces = faces.filter((f) => !L.isFrameOnlySeaFace(f.points, getSources));
+      const seam = L.analyzeSeam(graph, frame, tol);
+      const grouping = L.groupSeamPolygons(pieces, graph.points, frame, { tol, cut: seam.cut });
+
+      const bbox = (face) => {
+        const pts = face.points.map((i) => graph.points[i]);
+        return {
+          minX: Math.min(...pts.map((p) => p.x)), maxX: Math.max(...pts.map((p) => p.x)),
+          minY: Math.min(...pts.map((p) => p.y)), maxY: Math.max(...pts.map((p) => p.y)),
+        };
+      };
+      const near = (a, b) => Math.abs(a - b) < 1.5;
+      const findPiece = (minX, maxX, minY, maxY) => pieces.findIndex((f) => {
+        const b = bbox(f);
+        return near(b.minX, minX) && near(b.maxX, maxX) && near(b.minY, minY) && near(b.maxY, maxY);
+      });
+      const islandW = findPiece(0, 30, 20, 50);
+      const islandE = findPiece(370, 400, 20, 50);
+      const seaW = findPiece(0, 40, 80, 120);
+      const seaE = findPiece(360, 400, 80, 120);
+      const realCoast = findPiece(0, 50, 140, 170);
+      const groupOfPiece = (idx) => grouping.groups.find((g) => g.includes(idx)) || null;
+      const P = (x, y) => ({ x, y });
+      const checks = [
+        ["枠の仮想辺を追加し、再実行では増えない（冪等）", frameEdges > 0 && frameEdgesAgain === 0],
+        ["島の西・東ピース、海上国境の両ピース、経度180度の海岸線の陸が面になる",
+          [islandW, islandE, seaW, seaE, realCoast].every((i) => i >= 0)],
+        ["東端に線のない海上国境の面が枠の仮想辺で閉じる", seaE >= 0],
+        ["枠と海岸線だけで閉じたC字の湾は面にしない",
+          faces.length - pieces.length === 1 && findPiece(0, 40, 180, 190) === -1],
+        ["継ぎ目でつながるグループは島の1件だけ", grouping.groups.length === 1
+          && groupOfPiece(islandW) && groupOfPiece(islandW).includes(islandE)],
+        ["地図端に国境線がある海上国境はまとめない", !groupOfPiece(seaW) && !groupOfPiece(seaE)],
+        ["地図端の国境線の区間（y80–120）を国境として扱う",
+          seam.borderAny.length === 1 && near(seam.borderAny[0][0], 80) && near(seam.borderAny[0][1], 120)],
+        ["島の切断線は人工的（西・東とも）",
+          L.isArtificialSeamEdge(P(0, 30), P(0, 31), frame, tol, seam)
+          && L.isArtificialSeamEdge(P(400, 30), P(400, 31), frame, tol, seam)],
+        ["地図端の国境線は人工的ではない", !L.isArtificialSeamEdge(P(0, 100), P(0, 101), frame, tol, seam)],
+        ["経度180度上の本物の海岸線は人工的ではない（描画する）",
+          !L.isArtificialSeamEdge(P(0, 150), P(0, 151), frame, tol, seam) && !groupOfPiece(realCoast)],
+        ["区間演算: 差・積", JSON.stringify(L.subtractIntervals([[0, 10]], [[2, 3], [5, 6]])) === "[[0,2],[3,5],[6,10]]"
+          && JSON.stringify(L.intersectIntervals([[0, 4], [6, 10]], [[3, 7]])) === "[[3,4],[6,7]]"],
+        ["重なりが短い方の50%未満の区間はつながない（海上国境が両端で少しずれる場合）", (() => {
+          const pts = [P(0, 100), P(0, 300), P(0, 500), P(400, 100), P(400, 310), P(400, 500)];
+          const polys = [{ points: [0, 1] }, { points: [1, 2] }, { points: [3, 4] }, { points: [4, 5] }];
+          const r = L.groupSeamPolygons(polys, pts, { x: 0, y: 0, width: 400, height: 2000 }, { tol });
+          return r.groups.length === 2
+            && r.groups.some((g) => g.includes(0) && g.includes(2))
+            && r.groups.some((g) => g.includes(1) && g.includes(3));
+        })()],
+      ];
+      window.seamTestResults = checks.map(([label, ok]) => ({ label, ok: !!ok }));
+
+      const host = document.getElementById("seamCases");
+      host.innerHTML = "";
+      const card = document.createElement("div");
+      card.className = "case";
+      const allOk = checks.every(([, ok]) => ok);
+      card.innerHTML = `<div class="case-header"><h2 class="case-title">島・海上国境・本物の海岸線</h2>`
+        + `<span class="badge ${allOk ? "pass" : "fail"}">${allOk ? "PASS" : "FAIL"}</span></div>`
+        + `<div class="meta">面 ${faces.length} → ピース ${pieces.length}、グループ ${grouping.groups.length}、枠の仮想辺 ${frameEdges}本</div>`;
+      const list = document.createElement("ul");
+      list.className = "meta";
+      checks.forEach(([label, ok]) => {
+        const li = document.createElement("li");
+        li.textContent = `${ok ? "PASS" : "FAIL"}: ${label}`;
+        li.style.color = ok ? "var(--accent)" : "var(--danger)";
+        list.appendChild(li);
+      });
+      card.appendChild(list);
+      const svg = createSvg(408, 208);
+      svg.setAttribute("viewBox", "-4 -4 408 208");
+      svg.style.height = "220px";
+      const lines = (pred) => graph.edges.filter(pred).map((e) => ({ a: graph.points[e.a], b: graph.points[e.b] }));
+      const artificial = (e) => L.isArtificialSeamEdge(graph.points[e.a], graph.points[e.b], frame, tol, seam);
+      drawSegments(svg, lines((e) => e.sources.has("frame") && e.sources.size === 1), { stroke: "var(--ghost)", strokeWidth: "1", dash: "3 3" });
+      drawSegments(svg, lines((e) => e.sources.has("coast") && !artificial(e)), { stroke: "var(--accent)", strokeWidth: "1.5" });
+      drawSegments(svg, lines((e) => e.sources.has("border")), { stroke: "var(--line)", strokeWidth: "1.5" });
+      drawSegments(svg, lines((e) => e.sources.has("coast") && artificial(e)), { stroke: "var(--danger)", strokeWidth: "2", dash: "2 2" });
+      card.appendChild(svg);
+      const legend = document.createElement("div");
+      legend.className = "meta";
+      legend.textContent = "緑: 海岸線 / 青: 国境線 / 赤破線: 人工的な切断線（球面では描かない）/ 灰破線: 枠の仮想辺";
+      card.appendChild(legend);
+      host.appendChild(card);
+    }
+
+    runSeamCase().catch((error) => {
+      window.seamTestResults = [{ label: `例外: ${error.message}`, ok: false }];
+      document.getElementById("seamCases").textContent = `FAIL: ${error.message}`;
+    });
   </script>
 </body>
 </html>
