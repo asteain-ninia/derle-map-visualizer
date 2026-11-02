@@ -64,6 +64,49 @@
       letter-spacing: 0.08em;
     }
 
+    /* 折りたたみにした設定欄。見出しをそのまま摘みに使う（h2 を summary の中へ入れて
+       インライン表示にする。既定の marker は残すので開閉が分かる） */
+    details.group > summary {
+      cursor: pointer;
+      list-style-position: outside;
+    }
+
+    details.group > summary h2 {
+      display: inline;
+      margin: 0;
+    }
+
+    details.group[open] > summary h2 {
+      display: inline-block;
+      margin-bottom: 4px;
+    }
+
+    .selection-info {
+      font-size: 12px;
+      line-height: 1.7;
+    }
+
+    .selection-info .placeholder {
+      color: var(--muted);
+    }
+
+    .selection-info dl {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 2px 10px;
+      margin: 0;
+    }
+
+    .selection-info dt {
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .selection-info dd {
+      margin: 0;
+      overflow-wrap: anywhere;
+    }
+
     label {
       display: block;
       font-size: 12px;
@@ -284,7 +327,14 @@
     </div>
 
     <div class="group">
-      <h2>間引き</h2>
+      <h2>選択中の地物</h2>
+      <div id="selectionInfo" class="selection-info">
+        <div class="placeholder">多角形をクリックすると内容を表示します。</div>
+      </div>
+    </div>
+
+    <details class="group">
+      <summary><h2>間引き</h2></summary>
       <label for="sampleStep">間引き間隔（地図単位）</label>
       <input id="sampleStep" type="number" min="0.2" step="0.2" value="1.2" />
       <label for="snapTolerance">吸着許容値（地図単位）</label>
@@ -292,13 +342,24 @@
       <label for="dashSnapMultiplier">点線スナップ倍率</label>
       <input id="dashSnapMultiplier" type="number" min="1" step="0.5" value="3" />
       <div class="note">国境界の点線のみ、吸着許容値を倍率で拡大します。</div>
-    </div>
+      <label class="inline"><input id="bridgeGaps" type="checkbox" checked />国境の隙間を橋渡しする</label>
+      <label for="bridgeRadius">橋渡し半径（地図単位）</label>
+      <input id="bridgeRadius" type="number" min="0" step="0.5" value="2.5" />
+      <label for="bridgeBorderRadius">橋渡し半径・国境どうし（地図単位）</label>
+      <input id="bridgeBorderRadius" type="number" min="0" step="0.5" value="6" />
+      <div class="note">行き止まりの国境端点を近くの点へ繋いで、閉じ損ねた面を閉じます。大きい方の半径は、両端とも国境線の点のときだけ使います。</div>
+    </details>
 
     <div class="group">
       <h2>操作</h2>
       <button id="buildGraphBtn">グラフを構築</button>
       <button id="extractBtn" class="secondary">多角形を抽出</button>
-      <button id="exportBtn" class="secondary">JSONを書き出し</button>
+      <button id="exportBtn" class="secondary">.gimoza を書き出し</button>
+      <label class="inline"><input id="exportHierarchy" type="checkbox" checked />州境界で階層化する</label>
+      <div class="note">階層化すると国レベルと州レベルを続けて抽出するため、時間が倍かかります。</div>
+      <label for="exportTargetVertices">目標頂点数（間引き版を作るとき）</label>
+      <input id="exportTargetVertices" type="number" min="1000" step="500" value="16500" />
+      <div class="note">空欄ならフル版（derle-world-full.gimoza、冗長点だけを落とす）。数値を入れると、その頂点数あたりまで間引いた derle-world.gimoza を作ります。間引きで穴や隣の面がはみ出したら、その面だけ自動で原型に戻して組み直します。</div>
       <button id="clearBtn" class="danger">重ね表示を消去</button>
     </div>
 
@@ -352,6 +413,7 @@
   <svg id="measure" width="0" height="0" style="position:absolute; left:-9999px; top:-9999px;"></svg>
 
   <script src="logic.js"></script>
+  <script src="gimoza.js"></script>
   <script>
     const state = {
       svgText: null,
@@ -366,18 +428,28 @@
       polygonPaths: new Map(),
       polygonEdgeIndex: null,
       polygonTypes: new Map(),
+      // SVG を読み込むたびに進む世代番号。長い処理が await から戻ったとき、
+      // その間に別の SVG が読み込まれていないかをこれで確かめる
+      revision: 0,
+      bridges: [],
+      // 包含・領有はいずれも「面 id → 面 id」。抽出時に埋まる（詳細は extractPolygons のコメント）
+      polygonParents: new Map(),
+      polygonOwners: new Map(),
+      // 面 id → その面に載っている原図のラベル文字（複数ありうる）。抽出の最後に埋まる
+      polygonLabels: new Map(),
       selectedPolygons: new Set(),
       selectionOverlay: null,
       selectionBoundary: null,
       sharedSeaInfo: null,
       rawCoastSegments: [],
       borderCoastPointIndices: new Set(),
+      // 橋渡しで追加した辺の一覧（検証・デバッグ用。件数は構築後の状態表示にも出す）
+      bridges: [],
       buildSnapTolerance: null,
       zoom: 1,
       layerCheckboxes: new Map(),
       otherLayerElements: [],
       polygonsById: new Map(),
-      landPaths2D: [],
       wikiOutput: {
         pointVectors: null,
         polygonCenters: new Map(),
@@ -389,6 +461,16 @@
       },
     };
     let buildGraphInProgress = false;
+    let exportInProgress = false;
+    let extractInProgress = false;
+
+    /** 待っているあいだに別の SVG が読み込まれたときに投げる（失敗ではなく中断）。 */
+    class StaleRevisionError extends Error {
+      constructor() {
+        super("読み込まれた SVG が変わったため中断しました");
+        this.name = "StaleRevisionError";
+      }
+    }
 
     const layerDefs = [
       { id: "_海", label: "海" },
@@ -407,9 +489,15 @@
       sampleStep: document.getElementById("sampleStep"),
       snapTolerance: document.getElementById("snapTolerance"),
       dashSnapMultiplier: document.getElementById("dashSnapMultiplier"),
+      bridgeGaps: document.getElementById("bridgeGaps"),
+      bridgeRadius: document.getElementById("bridgeRadius"),
+      bridgeBorderRadius: document.getElementById("bridgeBorderRadius"),
       buildGraphBtn: document.getElementById("buildGraphBtn"),
       extractBtn: document.getElementById("extractBtn"),
       exportBtn: document.getElementById("exportBtn"),
+      exportHierarchy: document.getElementById("exportHierarchy"),
+      selectionInfo: document.getElementById("selectionInfo"),
+      exportTargetVertices: document.getElementById("exportTargetVertices"),
       clearBtn: document.getElementById("clearBtn"),
       toggleLandBtn: document.getElementById("toggleLandBtn"),
       toggleOtherBtn: document.getElementById("toggleOtherBtn"),
@@ -563,7 +651,60 @@
       return -1;
     }
 
-    function collectSharedSeaPolygons(borderGraph, borderPolygons, snap) {
+    /**
+     * 「点が海岸線の上にあるか」を tolerance 以内で答える関数を作る。
+     * 線分を一様グリッドに入れて近傍セルだけを見る（海岸線は 4 万本あるので総当たりは無理）。
+     */
+    function makeCoastProximityTest(coastSegments, tolerance) {
+      if (!coastSegments || coastSegments.length === 0) return () => false;
+      const cellSize = Math.max(tolerance, GEOM_EPS) * 2;
+      const tol2 = tolerance * tolerance;
+      const grid = new Map();
+      const key = (cx, cy) => `${cx}:${cy}`;
+      coastSegments.forEach((seg) => {
+        // 線分がまたぐセルすべてに入れる（端点のセルだけだと長い線分を取りこぼす）
+        const x0 = Math.floor(Math.min(seg.a.x, seg.b.x) / cellSize);
+        const x1 = Math.floor(Math.max(seg.a.x, seg.b.x) / cellSize);
+        const y0 = Math.floor(Math.min(seg.a.y, seg.b.y) / cellSize);
+        const y1 = Math.floor(Math.max(seg.a.y, seg.b.y) / cellSize);
+        for (let cx = x0; cx <= x1; cx += 1) {
+          for (let cy = y0; cy <= y1; cy += 1) {
+            const k = key(cx, cy);
+            if (!grid.has(k)) grid.set(k, []);
+            grid.get(k).push(seg);
+          }
+        }
+      });
+
+      const distSqToSegment = (p, a, b) => {
+        const vx = b.x - a.x;
+        const vy = b.y - a.y;
+        const len2 = vx * vx + vy * vy;
+        if (len2 <= 0) return distanceSq(p, a);
+        let t = ((p.x - a.x) * vx + (p.y - a.y) * vy) / len2;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const dx = p.x - (a.x + t * vx);
+        const dy = p.y - (a.y + t * vy);
+        return dx * dx + dy * dy;
+      };
+
+      return (point) => {
+        const cx = Math.floor(point.x / cellSize);
+        const cy = Math.floor(point.y / cellSize);
+        for (let dx = -1; dx <= 1; dx += 1) {
+          for (let dy = -1; dy <= 1; dy += 1) {
+            const list = grid.get(key(cx + dx, cy + dy));
+            if (!list) continue;
+            for (let i = 0; i < list.length; i += 1) {
+              if (distSqToSegment(point, list[i].a, list[i].b) <= tol2) return true;
+            }
+          }
+        }
+        return false;
+      };
+    }
+
+    function collectSharedSeaPolygons(borderGraph, borderPolygons, snap, coastSegments) {
       if (!borderGraph || borderPolygons.length === 0) {
         return { polygonData: [], sharedPolygons: new Set(), tolerance: 0 };
       }
@@ -575,9 +716,19 @@
       const polygonData = buildPolygonData(borderPolygons, borderGraph.points);
       const tolerance = Math.max(GEOM_EPS, snap * 0.1);
       const sharedPolygons = new Set();
+      // 要件定義書 §6.3 の「国境線が海岸線で終了し」を字義どおりに取る。
+      // 自由端が海岸線の上にあることまで確かめないと、作図で残った長さ 1 前後の「髭」
+      // （2 本の国境パスが V 字に出会う尖端の残り。実データに多数ある）を
+      // 「海岸線で終わる国境」と取り違え、その国が丸ごと共有する海に化ける。
+      // 実測: この条件を足すと共有する海の面が 64 → 28 に減り、報告された誤りが全部消える。
+      const isOnCoast = makeCoastProximityTest(coastSegments, Math.max(snap, GEOM_EPS));
 
       borderGraph.edges.forEach((edge) => {
-        if (degrees[edge.a] !== 1 && degrees[edge.b] !== 1) return;
+        const freeEnds = [];
+        if (degrees[edge.a] === 1) freeEnds.push(borderGraph.points[edge.a]);
+        if (degrees[edge.b] === 1) freeEnds.push(borderGraph.points[edge.b]);
+        if (freeEnds.length === 0) return;
+        if (!freeEnds.some((point) => isOnCoast(point))) return;
         const a = borderGraph.points[edge.a];
         const b = borderGraph.points[edge.b];
         const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
@@ -613,16 +764,23 @@
       });
     }
 
-    function clearOverlays() {
+    /**
+     * 重ね描きを消す。`keepSelection` を立てると選択だけ残す。
+     * 表示チェックボックスの切替は「描き直し」であって「選択の解除」ではないので、
+     * そこで選択と面積表示まで消えると、国を選んで面積を見た直後に点表示を触った
+     * だけで全部やり直しになる。
+     */
+    function clearOverlays(keepSelection) {
       if (!state.overlaySvg) return;
       state.overlaySvg.innerHTML = "";
       state.polygonsGroup = null;
       state.polygonPaths.clear();
-      state.selectedPolygons.clear();
+      if (!keepSelection) {
+        state.selectedPolygons.clear();
+        if (el.areaGroup) el.areaGroup.style.display = "none";
+      }
       state.selectionOverlay = null;
       state.selectionBoundary = null;
-      state.landPaths2D = [];
-      if (el.areaGroup) el.areaGroup.style.display = "none";
     }
 
     function parseViewBox(viewBox) {
@@ -701,11 +859,6 @@
       };
     }
 
-    function splitPathData(d) {
-      if (!d) return [];
-      return d.trim().split(/(?=[Mm])/).map((part) => part.trim()).filter(Boolean);
-    }
-
     function applyTransform(point, element) {
       if (!el.measureSvg) return { x: point.x, y: point.y };
       const ctm = element.getCTM();
@@ -717,23 +870,13 @@
       return { x: out.x, y: out.y };
     }
 
-    function samplePathElement(pathEl, step, pathDataOverride) {
-      if (!el.measureSvg) return [];
-      const clone = pathEl.cloneNode(true);
-      if (pathDataOverride) {
-        clone.setAttribute("d", pathDataOverride);
-      }
-      el.measureSvg.appendChild(clone);
-      const length = clone.getTotalLength();
-      const count = Math.max(2, Math.ceil(length / step));
-      const points = [];
-      for (let i = 0; i <= count; i += 1) {
-        const raw = clone.getPointAtLength((length * i) / count);
-        points.push(applyTransform(raw, clone));
-      }
-      el.measureSvg.removeChild(clone);
-      return points;
-    }
+    // パスの点列化と `d` のサブパス分割は logic.js のものを使う。ここに写しを置くと
+    // 片方だけ直したときに食い違う（実際 splitPathData でそれが起きた）。とくに点列化は
+    // getPointAtLength を使う旧方式のままだったため、Wikipedia風出力の陸地取得だけが
+    // 81 秒かかっていた（logic.js 側は `d` を直接読む方式に置き換わっている）。
+    const splitPathData = (d) => DerleLogic.splitPathData(d);
+    const samplePathElement = (pathEl, step, pathDataOverride) =>
+      DerleLogic.samplePathElement(pathEl, step, pathDataOverride);
 
     function samplePolylineElement(polyEl) {
       if (!el.measureSvg) return [];
@@ -787,6 +930,10 @@
       return output;
     }
 
+    // 潰れた小さい島を打ち直すときの最小弦長。実質「下限なし」だが正の値にしてある
+    // （0 だと、点数を長さ÷step で決める旧方式の経路が発散する）。
+    const LAND_RETRY_STEP = 0.01;
+
     function getLandSampleStep() {
       const base = el.sampleStep ? Number(el.sampleStep.value) : 1.2;
       if (!Number.isFinite(base) || base <= 0) return 3;
@@ -816,7 +963,13 @@
           const d = item.getAttribute("d") || "";
           const subpaths = splitPathData(d);
           subpaths.forEach((subpath) => {
-            const points = cleanPathPoints(samplePathElement(item, step, subpath));
+            let points = cleanPathPoints(samplePathElement(item, step, subpath));
+            if (points.length < 3) {
+              // 小さい島は、輪郭全体が最小弦長より短いと 2 点以下に潰れて丸ごと消える。
+              // 面として描けることのほうが点の粗さより大事なので、細かく打ち直す。
+              // 0 は渡せない（弧を含むパスが落ちる旧方式の経路で、点数が発散する）。
+              points = cleanPathPoints(samplePathElement(item, LAND_RETRY_STEP, subpath));
+            }
             if (points.length < 3) return;
             const vectors = points.map((pt) => mapPointToVector(pt, vb)).filter(Boolean);
             if (vectors.length >= 3) {
@@ -849,39 +1002,57 @@
       return vectorPaths;
     }
 
-    function collectLandPaths2D(step) {
-      if (!state.baseSvg) return [];
-      const paths2D = [];
-      let targetLayer = null;
+    function getLandLayer() {
+      if (!state.baseSvg) return null;
       for (let i = 0; i < landLayerIds.length; i += 1) {
         const candidate = state.baseSvg.getElementById(landLayerIds[i]);
-        if (candidate) { targetLayer = candidate; break; }
+        if (candidate) return candidate;
       }
-      if (!targetLayer) return [];
-      const elements = Array.from(targetLayer.querySelectorAll("path, polygon, polyline, rect"));
+      return null;
+    }
+
+    function drawLandOnCanvas(ctx, minX, minY, scl) {
+      const layer = getLandLayer();
+      if (!layer) return false;
+      const elements = Array.from(layer.querySelectorAll("path, polygon, polyline, rect"));
+      if (!elements.length) return false;
+      ctx.fillStyle = "white";
       elements.forEach((item) => {
         const tag = item.tagName.toLowerCase();
+        let d = "";
         if (tag === "path") {
-          const d = item.getAttribute("d") || "";
-          splitPathData(d).forEach((subpath) => {
-            const points = cleanPathPoints(samplePathElement(item, step, subpath));
-            if (points.length >= 3) paths2D.push(points);
-          });
+          d = item.getAttribute("d") || "";
         } else if (tag === "polygon" || tag === "polyline") {
-          let points = samplePolylineElement(item);
-          if (points.length >= 3) {
-            points = cleanPathPoints(points.concat(points[0]));
-            if (points.length >= 3) paths2D.push(points);
-          }
+          const pts = (item.getAttribute("points") || "").trim();
+          if (pts) d = "M" + pts.split(/\s+/).join(" L") + " Z";
         } else if (tag === "rect") {
-          let points = sampleRectElement(item);
-          if (points.length >= 3) {
-            points = cleanPathPoints(points.concat(points[0]));
-            if (points.length >= 3) paths2D.push(points);
-          }
+          const rx = parseFloat(item.getAttribute("x")) || 0;
+          const ry = parseFloat(item.getAttribute("y")) || 0;
+          const rw = parseFloat(item.getAttribute("width")) || 0;
+          const rh = parseFloat(item.getAttribute("height")) || 0;
+          d = `M${rx} ${ry} H${rx + rw} V${ry + rh} H${rx} Z`;
         }
+        if (!d) return;
+        const clone = item.cloneNode(true);
+        el.measureSvg.appendChild(clone);
+        const ctm = clone.getCTM();
+        el.measureSvg.removeChild(clone);
+        ctx.save();
+        if (ctm) {
+          ctx.setTransform(
+            ctm.a * scl, ctm.b * scl,
+            ctm.c * scl, ctm.d * scl,
+            (ctm.e - minX) * scl, (ctm.f - minY) * scl
+          );
+        } else {
+          ctx.setTransform(scl, 0, 0, scl, -minX * scl, -minY * scl);
+        }
+        // Wikipedia風出力の陸地は evenodd で塗っている。ここを既定の nonzero のままに
+        // すると、湖や穴のある陸地で「見えている陸」と「面積として数える陸」がずれる。
+        ctx.fill(new Path2D(d), "evenodd");
+        ctx.restore();
       });
-      return paths2D;
+      return true;
     }
 
     function formatArea(value) {
@@ -941,23 +1112,12 @@
         ctx1.fill();
       });
 
-      const hasLand = state.landPaths2D.length > 0;
+      const c2 = document.createElement("canvas");
+      c2.width = cw; c2.height = ch;
+      const ctx2 = c2.getContext("2d");
+      const hasLand = drawLandOnCanvas(ctx2, minX, minY, scl);
       let d2 = null;
       if (hasLand) {
-        const c2 = document.createElement("canvas");
-        c2.width = cw; c2.height = ch;
-        const ctx2 = c2.getContext("2d");
-        ctx2.fillStyle = "white";
-        state.landPaths2D.forEach((path) => {
-          ctx2.beginPath();
-          path.forEach((p, i) => {
-            const cx = (p.x - minX) * scl;
-            const cy = (p.y - minY) * scl;
-            if (i === 0) ctx2.moveTo(cx, cy); else ctx2.lineTo(cx, cy);
-          });
-          ctx2.closePath();
-          ctx2.fill();
-        });
         d2 = ctx2.getImageData(0, 0, cw, ch).data;
       }
 
@@ -1043,13 +1203,36 @@
       return true;
     }
 
+    /**
+     * Wikipedia風出力で塗る面を決める。
+     *
+     * この出力は「一番上の領域」を見せるもので、島と海の区別だけ分かれば足りる。
+     * そこで選択を領有関係でならす:
+     *   - 領有されている面（他国の国境線に囲まれた島など）を選んだら、領有する側へ繰り上げる
+     *   - 選ばれた面が領有している面は、まとめて同じ領域として塗る
+     * 面の中の面をそれぞれ別の色で塗ると、どこが一国なのか読めなくなるため。
+     */
+    function resolveWikiSelection() {
+      const owners = state.polygonOwners || new Map();
+      const tops = new Set();
+      state.selectedPolygons.forEach((id) => {
+        tops.add(owners.get(id) || id);
+      });
+      if (!tops.size) return tops;
+      const result = new Set(tops);
+      owners.forEach((ownerId, childId) => {
+        if (tops.has(ownerId)) result.add(childId);
+      });
+      return result;
+    }
+
     function computeSelectionCenterVector() {
       if (!state.selectedPolygons.size || !state.wikiOutput.polygonCenters) return null;
       let sx = 0;
       let sy = 0;
       let sz = 0;
       let count = 0;
-      state.selectedPolygons.forEach((id) => {
+      resolveWikiSelection().forEach((id) => {
         const center = state.wikiOutput.polygonCenters.get(id);
         if (!center) return;
         sx += center.x;
@@ -1535,13 +1718,14 @@
 
       const allPolygonPaths = [];
       const selectedPolygonPaths = [];
+      const wikiSelection = resolveWikiSelection();
       state.polygons.forEach((poly) => {
         const clipped = clipPolygonToHemisphere(poly.points, rotX, rotY, rotZ, projX, projY, lonArr, latArr, back);
         if (clipped.length < 3) return;
         const d = buildPathFromPoints(clipped);
         if (!d) return;
         allPolygonPaths.push(d);
-        if (state.selectedPolygons.has(String(poly.id))) {
+        if (wikiSelection.has(String(poly.id))) {
           selectedPolygonPaths.push(d);
         }
       });
@@ -1723,6 +1907,12 @@
       const blob = new Blob([svg], { type: "image/svg+xml" });
       const url = URL.createObjectURL(blob);
       const img = new Image();
+      // 失敗しても黙って終わらないようにする。9600px だとキャンバスは RGBA で約 350MB
+      // になり、環境によっては toBlob が null を返す（何も起きないので原因が分からない）。
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        setStatus("PNG の書き出しに失敗しました（画像を読み込めませんでした）。");
+      };
       img.onload = () => {
         const canvas = document.createElement("canvas");
         canvas.width = size;
@@ -1731,7 +1921,11 @@
         ctx.clearRect(0, 0, size, size);
         ctx.drawImage(img, 0, 0, size, size);
         canvas.toBlob((pngBlob) => {
-          if (!pngBlob) return;
+          if (!pngBlob) {
+            URL.revokeObjectURL(url);
+            setStatus(`PNG の書き出しに失敗しました。出力サイズ ${size}px が大きすぎる可能性があります。`);
+            return;
+          }
           const pngUrl = URL.createObjectURL(pngBlob);
           const link = document.createElement("a");
           link.href = pngUrl;
@@ -2063,7 +2257,117 @@
       updateSelectionOverlay();
       updateSelectionBoundary();
       computeAndDisplayArea();
+      renderSelectionInfo();
       scheduleWikipediaUpdate(false);
+    }
+
+    /**
+     * 原図のラベル文字を面へ対応付ける。判定は gimoza.js（書き出しと同じもの）に任せる。
+     * ここで自前判定を書くと、画面に出る名前と書き出される名前がずれるため。
+     */
+    function collectPolygonLabels() {
+      const empty = new Map();
+      if (!state.svgDoc || !state.polygons.length) return empty;
+      if (!window.Gimoza || typeof Gimoza.assignLabelsToPolygons !== "function") return empty;
+      try {
+        const labels = Gimoza.extractLabels(state.svgDoc);
+        // 陸海の判定を渡さないと、海へはみ出して置かれた国名が海の面に付いてしまう。
+        // 地形レイヤーを 1 度だけ焼いて画素で見るので、渡すぶんのコストはほぼ無い。
+        const isLand = typeof Gimoza.makeLandTester === "function"
+          ? Gimoza.makeLandTester(state.svgDoc)
+          : undefined;
+        const assigned = Gimoza.assignLabelsToPolygons(labels, state.polygons, state.graph.points, { isLand });
+        const out = new Map();
+        // 国名とそれ以外を分ける。国レベルの面には州名・地名・海名・山岳名まで
+        // 全部載る（デーレ共和国で 55 件）ので、そのまま並べると読めない。
+        (assigned.byLabel || []).forEach((entry) => {
+          if (entry.polygonId === null || entry.polygonId === undefined) return;
+          const key = String(entry.polygonId);
+          let bucket = out.get(key);
+          if (!bucket) {
+            bucket = { primary: [], others: [] };
+            out.set(key, bucket);
+          }
+          (entry.layer === "_国名" ? bucket.primary : bucket.others).push(entry.text);
+        });
+        return out;
+      } catch (error) {
+        setStatus(`ラベルの対応付けに失敗しました: ${error.message}`);
+        return empty;
+      }
+    }
+
+    const SELECTION_LABEL_LIMIT = 5;
+
+    /** 選択中の面に出す名前。国名を先に、それ以外は数件だけ並べて残りは件数で示す。 */
+    function formatSelectionLabels(bucket) {
+      if (!bucket || (!bucket.primary.length && !bucket.others.length)) {
+        return '<span class="placeholder">（ラベルなし）</span>';
+      }
+      const parts = [];
+      if (bucket.primary.length) {
+        parts.push(`<strong>${bucket.primary.map(escapeHtml).join("、")}</strong>`);
+      }
+      if (bucket.others.length) {
+        const shown = bucket.others.slice(0, SELECTION_LABEL_LIMIT).map(escapeHtml).join("、");
+        const rest = bucket.others.length - SELECTION_LABEL_LIMIT;
+        parts.push(rest > 0 ? `${shown} ほか ${rest} 件` : shown);
+      }
+      return parts.join("<br>");
+    }
+
+    /** 選択中の面の中身（載っているラベル・種別・面積・内包/領有）を出す。 */
+    function renderSelectionInfo() {
+      const box = el.selectionInfo;
+      if (!box) return;
+      const ids = [...state.selectedPolygons];
+      if (ids.length === 0) {
+        box.innerHTML = '<div class="placeholder">多角形をクリックすると内容を表示します。</div>';
+        return;
+      }
+      if (ids.length > 1) {
+        // 複数選択のときは種別の内訳だけ。1 件ずつ並べると縦に伸びすぎる
+        const counts = new Map();
+        ids.forEach((id) => {
+          const type = state.polygonTypes.get(id) || "不明";
+          counts.set(type, (counts.get(type) || 0) + 1);
+        });
+        const rows = [...counts.entries()]
+          .map(([type, n]) => `<dt>${escapeHtml(type)}</dt><dd>${n}面</dd>`)
+          .join("");
+        box.innerHTML = `<dl><dt>選択</dt><dd>${ids.length}面</dd>${rows}</dl>`;
+        return;
+      }
+
+      const id = ids[0];
+      const poly = state.polygonsById.get(id);
+      const rows = [
+        ["地物名", formatSelectionLabels(state.polygonLabels && state.polygonLabels.get(id))],
+        ["種別", escapeHtml(state.polygonTypes.get(id) || "不明")],
+        ["面 id", escapeHtml(id)],
+        ["面積", poly ? poly.area.toFixed(2) : "—"],
+      ];
+      const parent = state.polygonParents.get(id);
+      if (parent) rows.push(["内包する面", escapeHtml(parent)]);
+      const owner = state.polygonOwners.get(id);
+      rows.push([
+        "領有",
+        owner
+          ? `面 ${escapeHtml(owner)} に領有されている`
+          : '<span class="placeholder">なし</span>',
+      ]);
+      const owned = [];
+      state.polygonOwners.forEach((ownerId, childId) => {
+        if (ownerId === id) owned.push(childId);
+      });
+      if (owned.length) rows.push(["領有している面", `${owned.length}面`]);
+
+      box.innerHTML = `<dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>`;
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"]/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
     }
 
     function handleOverlayClick(event) {
@@ -2127,7 +2431,11 @@
           const dashValue = extractStyleValue(body, "stroke-dasharray");
           if (!hasDashValue(dashValue)) continue;
           selectors.split(",").forEach((selector) => {
-            const classMatches = selector.match(/\\.([_a-zA-Z0-9-]+)/g);
+            // `\\.` だと「バックスラッシュ + 任意の 1 文字」を探すことになり、
+            // `.cls-21` のようなセレクタには決して一致しない。原図の点線は 6 件とも
+            // <style> のクラス規則で指定されているので、この 1 文字のせいで点線クラスの
+            // 収集が常に空になり、「点線スナップ倍率」が一度も効いていなかった。
+            const classMatches = selector.match(/\.([_a-zA-Z0-9-]+)/g);
             if (!classMatches) return;
             classMatches.forEach((cls) => dashed.add(cls.slice(1)));
           });
@@ -2166,6 +2474,27 @@
       return value;
     }
 
+    // 橋渡し（閉じ損ねた国境の隙間を繋ぐ）の設定。UI が無い場合や不正値のときは
+    // 移植元（derle-import/tools/extract-polygons.mjs）の既定値へ落とす。
+    function getBridgeEnabled() {
+      if (!el.bridgeGaps) return true;
+      return el.bridgeGaps.checked;
+    }
+
+    function getBridgeRadius() {
+      if (!el.bridgeRadius) return 2.5;
+      const value = Number(el.bridgeRadius.value);
+      if (!Number.isFinite(value) || value <= 0) return 2.5;
+      return value;
+    }
+
+    function getBridgeBorderRadius() {
+      if (!el.bridgeBorderRadius) return 6;
+      const value = Number(el.bridgeBorderRadius.value);
+      if (!Number.isFinite(value) || value <= 0) return 6;
+      return value;
+    }
+
     function loadSvgText(text) {
       const parser = new DOMParser();
       const doc = parser.parseFromString(text, "image/svg+xml");
@@ -2173,6 +2502,25 @@
       if (!svg || svg.nodeName.toLowerCase() !== "svg") {
         throw new Error("Invalid SVG file.");
       }
+
+      // 別の SVG を読み込んだら、前の SVG から作った派生データは全部無効になる。
+      // 消さずに残すと、新しい図に対して古いグラフのまま「多角形を抽出」できてしまう。
+      // 世代番号も進め、進行中のグラフ構築・抽出・書き出しが await から戻ったときに
+      // 自分が古い世代だと気づいて中断できるようにする。
+      state.revision += 1;
+      state.graph = null;
+      state.polygons = [];
+      state.polygonsById = new Map();
+      state.polygonEdgeIndex = null;
+      state.polygonTypes = new Map();
+      state.polygonParents = new Map();
+      state.polygonOwners = new Map();
+      state.polygonLabels = new Map();
+      state.sharedSeaInfo = null;
+      state.rawCoastSegments = [];
+      state.borderCoastPointIndices = new Set();
+      state.buildSnapTolerance = null;
+      state.bridges = [];
 
       state.svgText = text;
       state.svgDoc = doc;
@@ -2341,7 +2689,10 @@
       el.extractBtn.disabled = true;
       el.exportBtn.disabled = true;
 
+      const revision = state.revision;
       const updateProgress = (phase, done, total, extra) => {
+        // 待っているあいだに別の SVG が読み込まれていたら、その時点で降りる
+        if (state.revision !== revision) throw new StaleRevisionError();
         const progress = formatProgress(done, total);
         setBuildStatus([phase, progress, extra]);
       };
@@ -2360,6 +2711,7 @@
         state.polygonTypes.clear();
         state.rawCoastSegments = [];
         state.borderCoastPointIndices = new Set();
+        state.bridges = [];
         state.buildSnapTolerance = snap;
         clearOverlays();
         resetWikipediaOutput();
@@ -2436,7 +2788,7 @@
             updateProgress("国境線の構造解析中", done, total);
           });
           const borderResult = DerleLogic.extractPolygonsFromGraph(borderGraph, minArea);
-          sharedInfo = collectSharedSeaPolygons(borderGraph, borderResult.polygons, snap);
+          sharedInfo = collectSharedSeaPolygons(borderGraph, borderResult.polygons, snap, coastOnlySegments);
           sharedSeaCount = sharedInfo.sharedPolygons.size;
 
           const filteredCoastSegments = filterCoastSegments(
@@ -2454,6 +2806,22 @@
         const graph = await DerleLogic.buildGraphFromSegments(finalSegments, snap, (done, total) => {
           updateProgress("点と辺を構築中", done, total, `線分: ${finalSegments.length}`);
         });
+
+        // 閉じ損ねた国境の橋渡し。原図には吸着許容値をわずかに超える隙間が実在し、
+        // そのままでは面が閉じずに隣国と融合するため、行き止まりの端点を近傍へ繋ぐ。
+        // 面抽出はこのグラフをそのまま使うので、抽出（extractPolygons）より前に行う。
+        let bridgeResult = null;
+        if (getBridgeEnabled()) {
+          updateProgress("国境の隙間を橋渡し中", 0, 0);
+          bridgeResult = await DerleLogic.bridgeOpenBorderGaps(graph, {
+            radius: getBridgeRadius(),
+            borderRadius: getBridgeBorderRadius(),
+            onProgress: (done, total) => {
+              updateProgress("国境の隙間を橋渡し中", done, total);
+            },
+          });
+        }
+        state.bridges = bridgeResult ? bridgeResult.bridges : [];
 
         state.graph = graph;
         state.sharedSeaInfo = sharedInfo && borderGraph
@@ -2479,15 +2847,38 @@
             : `海岸線(${coastLayerId})を含めました。`;
         }
 
+        const bridgeMessage = bridgeResult
+          ? `橋渡し: ${bridgeResult.bridges.length}箇所（交差のため棄却: ${bridgeResult.rejected}箇所）`
+          : "橋渡し: 無効";
+
+        // 相対 m で始まるサブパスは、単独で切り出すと座標が黙って移動する（logic.js の
+        // countRelativeSubpathStarts のコメント参照）。今の原図には無いが、書き出し設定が
+        // 変わったときに無症状で発症するので、見つけたら必ず表に出す。
+        const relativeStarts =
+          DerleLogic.countRelativeSubpathStarts(borderLayer) +
+          (coastLayer ? DerleLogic.countRelativeSubpathStarts(coastLayer) : 0);
+        const relativeMessage = relativeStarts > 0
+          ? `⚠ 相対 m で始まるサブパスが ${relativeStarts} 件あります。その形の座標がずれている可能性があります。`
+          : null;
+
         setStatus([
           `グラフを構築しました。`,
           `点: ${graph.points.length}`,
           `辺: ${graph.edges.length}`,
           `線分: ${finalSegments.length}`,
+          bridgeMessage,
           coastMessage,
-        ].join("\n"));
+          relativeMessage,
+        ].filter(Boolean).join("\n"));
       } catch (error) {
-        setStatus(`グラフ構築に失敗しました: ${error.message}`);
+        // 落ちたまま state.graph に半端なものを残さない（抽出が古い形で走るため）
+        state.graph = null;
+        setStatus(
+          error instanceof StaleRevisionError
+            ? "別の SVG が読み込まれたため、グラフ構築を中断しました。"
+            : `グラフ構築に失敗しました: ${error.message}`,
+        );
+        throw error;
       } finally {
         buildGraphInProgress = false;
         el.buildGraphBtn.disabled = false;
@@ -2496,78 +2887,149 @@
       }
     }
 
-    function extractPolygons() {
+    // 抽出は段階ごとに区切って進捗を出す。合計 0.6 秒ほどだが、一息に回すと
+    // その間ボタンも状態表示も固まって「落ちた」ように見えるため（グラフ構築と同じ流儀）。
+    async function extractPolygons() {
       if (!state.graph) {
         setStatus("先にグラフを構築してください。");
         return;
       }
-
-      const minArea = 0;
-      const result = DerleLogic.extractPolygonsFromGraph(state.graph, minArea);
-      if (result.polygons.length === 0 && result.outerFaces.length === 0) {
-        setStatus("多角形が見つかりません。間引き設定を調整するか海岸線を有効にしてください。");
+      if (extractInProgress) {
+        setStatus("多角形を抽出中です。完了を待ってください。");
         return;
       }
+      extractInProgress = true;
+      el.extractBtn.disabled = true;
+      el.buildGraphBtn.disabled = true;
+      el.exportBtn.disabled = true;
+      const revision = state.revision;
+      const step = async (label) => {
+        setStatus(`多角形を抽出中...\n${label}`);
+        await DerleLogic.nextFrame();
+        // 待っているあいだに別の SVG が読み込まれていたら、
+        // 古いグラフの結果を新しい図へ書き戻さずに降りる
+        if (state.revision !== revision) throw new StaleRevisionError();
+      };
+      try {
+        await step("面を探索中...");
+        const minArea = 0;
+        const result = DerleLogic.extractPolygonsFromGraph(state.graph, minArea);
+        if (result.polygons.length === 0 && result.outerFaces.length === 0) {
+          throw new Error("多角形が見つかりません。間引き設定を調整するか海岸線を有効にしてください。");
+        }
 
-      state.polygons = result.polygons.map((face, idx) => {
-        return {
-          id: idx + 1,
-          area: face.area,
-          points: face.points,
-          fill: randomFill(idx + 1),
-        };
-      });
-      state.polygonsById = new Map(state.polygons.map((poly) => [String(poly.id), poly]));
+        state.polygons = result.polygons.map((face, idx) => {
+          return {
+            id: idx + 1,
+            area: face.area,
+            points: face.points,
+            fill: randomFill(idx + 1),
+          };
+        });
+        state.polygonsById = new Map(state.polygons.map((poly) => [String(poly.id), poly]));
 
-      clearOverlays();
-      state.polygonEdgeIndex = null;
-      state.polygonTypes.clear();
-      state.polygonEdgeIndex = buildPolygonEdgeIndex(state.polygons, state.graph);
-      let coastInfo = null;
-      if (state.rawCoastSegments && state.rawCoastSegments.length) {
-        const snap = Number.isFinite(state.buildSnapTolerance)
-          ? state.buildSnapTolerance
-          : Number(el.snapTolerance.value);
-        const tolerance = Math.max(GEOM_EPS, snap * 0.1);
-        const polygonData = buildPolygonData(state.polygons, state.graph.points);
-        const coastInsidePolygons = collectCoastInsidePolygons(
-          state.rawCoastSegments,
-          polygonData,
-          state.graph.points,
-          tolerance,
+        clearOverlays();
+        state.polygonEdgeIndex = null;
+        state.polygonTypes.clear();
+        await step(`面の索引を作成中... (${state.polygons.length}面)`);
+        state.polygonEdgeIndex = buildPolygonEdgeIndex(state.polygons, state.graph);
+        let coastInfo = null;
+        if (state.rawCoastSegments && state.rawCoastSegments.length) {
+          await step("海岸線の内外を判定中...");
+          const snap = Number.isFinite(state.buildSnapTolerance)
+            ? state.buildSnapTolerance
+            : Number(el.snapTolerance.value);
+          const tolerance = Math.max(GEOM_EPS, snap * 0.1);
+          const polygonData = buildPolygonData(state.polygons, state.graph.points);
+          const coastInsidePolygons = collectCoastInsidePolygons(
+            state.rawCoastSegments,
+            polygonData,
+            state.graph.points,
+            tolerance,
+          );
+          coastInfo = {
+            borderCoastPoints: state.borderCoastPointIndices || new Set(),
+            coastInsidePolygons,
+          };
+        }
+        if (state.polygonEdgeIndex) {
+          await step("国タイプを判定中...");
+          state.polygonTypes = classifyPolygons(
+            state.polygons,
+            state.graph,
+            state.polygonEdgeIndex.edgeSources,
+            state.sharedSeaInfo,
+            coastInfo,
+          );
+        }
+        // 領有関係（要件定義書 §6.3）: 国境線に囲まれた島は、その領域が領有する。
+        // 種別が確定していないと「領有する側になれるか」を判定できないので、分類の直後に求める。
+        //   state.polygonParents … ポリゴン id → それを内包する最小の面の id（幾何的な包含）
+        //   state.polygonOwners  … ポリゴン id → 領有する面の id（親の種別が領有する側のときだけ）
+        await step("領有関係を解析中...");
+        {
+          const typeList = state.polygons.map(
+            (p) => state.polygonTypes.get(String(p.id)) || "不明",
+          );
+          const ownership = DerleLogic.computeOwnership(
+            state.polygons,
+            state.graph.points,
+            typeList,
+          );
+          state.polygonParents = new Map();
+          state.polygonOwners = new Map();
+          state.polygons.forEach((p, i) => {
+            const parent = ownership.parents[i];
+            const owner = ownership.owners[i];
+            if (parent !== -1) {
+              state.polygonParents.set(String(p.id), String(state.polygons[parent].id));
+            }
+            if (owner !== -1) {
+              state.polygonOwners.set(String(p.id), String(state.polygons[owner].id));
+            }
+          });
+        }
+
+        await step("ラベルを面へ対応付け中...");
+        state.polygonLabels = collectPolygonLabels();
+
+        await step("球面出力の下ごしらえ中...");
+        buildWikipediaCache();
+
+        await step("重ね表示を描画中...");
+        drawEdges();
+        drawPolygons();
+        drawPoints();
+        scheduleWikipediaUpdate(true);
+
+        const ownedCount = state.polygonOwners.size;
+        const outerCount = result.outerFaces.length;
+        const outerMessage = outerCount === 0
+          ? "外側の面が見つかりませんでした。"
+          : outerCount === 1
+            ? `外側の面を除外しました: 面積 ${result.outerFaces[0].area.toFixed(2)}`
+            : `外側の面を除外しました: ${outerCount}面`;
+
+        setStatus([
+          `多角形を抽出しました: ${state.polygons.length}`,
+          outerMessage,
+          `領有関係: ${ownedCount}面が他の領域に領有されています`,
+        ].join("\n"));
+      } catch (error) {
+        // 途中で落ちた state（種別が空・領有が前回のまま等）を「成功」として
+        // 書き出し側へ渡さないよう、呼び出し元へ投げ直す。
+        setStatus(
+          error instanceof StaleRevisionError
+            ? "別の SVG が読み込まれたため、多角形の抽出を中断しました。"
+            : `多角形の抽出に失敗しました: ${error.message}`,
         );
-        coastInfo = {
-          borderCoastPoints: state.borderCoastPointIndices || new Set(),
-          coastInsidePolygons,
-        };
+        throw error;
+      } finally {
+        extractInProgress = false;
+        el.extractBtn.disabled = false;
+        el.buildGraphBtn.disabled = false;
+        el.exportBtn.disabled = false;
       }
-      if (state.polygonEdgeIndex) {
-        state.polygonTypes = classifyPolygons(
-          state.polygons,
-          state.graph,
-          state.polygonEdgeIndex.edgeSources,
-          state.sharedSeaInfo,
-          coastInfo,
-        );
-      }
-      buildWikipediaCache();
-      state.landPaths2D = collectLandPaths2D(getLandSampleStep());
-      drawEdges();
-      drawPolygons();
-      drawPoints();
-      scheduleWikipediaUpdate(true);
-
-      const outerCount = result.outerFaces.length;
-      const outerMessage = outerCount === 0
-        ? "外側の面が見つかりませんでした。"
-        : outerCount === 1
-          ? `外側の面を除外しました: 面積 ${result.outerFaces[0].area.toFixed(2)}`
-          : `外側の面を除外しました: ${outerCount}面`;
-
-      setStatus([
-        `多角形を抽出しました: ${state.polygons.length}`,
-        outerMessage,
-      ].join("\n"));
     }
 
     function drawEdges() {
@@ -2739,41 +3201,123 @@
       state.overlaySvg.appendChild(group);
     }
 
-    function exportJson() {
-      if (!state.graph || !state.polygons.length) {
-        setStatus("先にグラフを構築して多角形を抽出してください。");
+    /**
+     * `_州境界` の子要素を `_国境界` へ移す。返り値を呼ぶと元の位置へ戻す。
+     *
+     * 州境界を国境と同じグラフに混ぜると、州レベルの細かい面が取れる。
+     * 国レベル（既定の抽出）の面と突き合わせることで「国＝州の集まり」という
+     * 階層が組める。DOM を触るのは抽出の間だけで、終わったら必ず戻す。
+     */
+    function mergeStateBordersIntoCountry() {
+      const doc = state.svgDoc;
+      const stateLayer = doc && doc.getElementById("_州境界");
+      const countryLayer = doc && doc.getElementById("_国境界");
+      if (!stateLayer || !countryLayer) return () => {};
+      const moved = Array.from(stateLayer.children);
+      moved.forEach((node) => countryLayer.appendChild(node));
+      return () => moved.forEach((node) => stateLayer.appendChild(node));
+    }
+
+    /** 抽出結果を後段へ渡せる素の値として写し取る（state は次の抽出で上書きされるため）。 */
+    function snapshotExtraction() {
+      return {
+        points: state.graph.points.map((pt) => ({ x: pt.x, y: pt.y })),
+        edges: state.graph.edges.map((edge) => ({
+          a: edge.a,
+          b: edge.b,
+          sources: Array.from(edge.sources),
+        })),
+        polygons: state.polygons.map((poly) => ({
+          id: poly.id,
+          area: poly.area,
+          points: poly.points.slice(),
+        })),
+        types: new Map(state.polygonTypes),
+        parents: new Map(state.polygonParents),
+        owners: new Map(state.polygonOwners),
+      };
+    }
+
+    /** グラフ構築から多角形抽出までを一往復させ、結果を写し取って返す。 */
+    async function runExtractionPass(withStates) {
+      const restore = withStates ? mergeStateBordersIntoCountry() : () => {};
+      try {
+        await buildGraph();
+        if (!state.graph) throw new Error("グラフを構築できませんでした");
+        await extractPolygons();
+        if (!state.polygons.length) throw new Error("多角形が1つも取れませんでした");
+        return snapshotExtraction();
+      } finally {
+        restore();
+      }
+    }
+
+    async function exportGimoza() {
+      if (!state.svgDoc) {
+        setStatus("先にSVGファイルを読み込んでください。");
         return;
       }
+      if (exportInProgress) {
+        setStatus("書き出し中です。完了を待ってください。");
+        return;
+      }
+      exportInProgress = true;
+      try {
+        const hierarchical = el.exportHierarchy ? el.exportHierarchy.checked : false;
+        let countryPass = null;
+        if (hierarchical) {
+          setStatus("国レベルを抽出中…（1/2）");
+          countryPass = await runExtractionPass(false);
+        }
+        setStatus(hierarchical ? "州レベルを抽出中…（2/2）" : "抽出中…");
+        const basePass = await runExtractionPass(hierarchical);
 
-      const edgeOutput = state.graph.edges.map((edge) => ({
-        a: edge.a,
-        b: edge.b,
-        sources: Array.from(edge.sources),
-      }));
+        // 目標頂点数が空欄ならフル版、数値が入っていればその頂点数まで間引いた版。
+        const rawTarget = el.exportTargetVertices ? el.exportTargetVertices.value.trim() : "";
+        const targetVertices = rawTarget === "" ? null : Number(rawTarget);
+        if (targetVertices !== null && !(targetVertices > 0)) {
+          setStatus("目標頂点数には正の数を入れてください（空欄ならフル版）。");
+          return;
+        }
+        const fileName = targetVertices === null ? "derle-world-full.gimoza" : "derle-world.gimoza";
 
-      const payload = {
-        meta: {
-          createdAt: new Date().toISOString(),
-          sampleStep: Number(el.sampleStep.value),
-          snapTolerance: Number(el.snapTolerance.value),
-          coastlineIncluded: true,
-        },
-        points: state.graph.points.map((pt) => ({ x: pt.x, y: pt.y })),
-        edges: edgeOutput,
-        polygons: state.polygons,
-      };
+        setStatus(".gimoza を組み立て中…");
+        const bytes = await Gimoza.exportGimoza({
+          points: basePass.points,
+          edges: basePass.edges,
+          polygons: basePass.polygons,
+          types: basePass.types,
+          svgDoc: state.svgDoc,
+          countryPolygons: countryPass,
+          // 間引き版は「組み立て → 整合性チェック → 落ちた面の間引きを解除 → 組み直し」を
+          // 内部で繰り返すので、途中経過を状況欄へ流す。
+          options:
+            targetVertices === null
+              ? {}
+              : { targetVertices, onProgress: (message) => setStatus(message) },
+        });
 
-      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = "borders.json";
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
+        const blob = new Blob([bytes], { type: "application/zip" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
 
-      setStatus("borders.jsonを書き出しました。");
+        setStatus([
+          `${fileName} を書き出しました（${(bytes.length / 1024 / 1024).toFixed(2)} MB）。`,
+          targetVertices === null ? "フル版（冗長点の除去のみ）" : `間引き版（目標 ${targetVertices} 頂点）`,
+          `面: ${basePass.polygons.length}`,
+          hierarchical ? `国レベルの面: ${countryPass.polygons.length}` : "階層化なし（フラット）",
+        ].join("\n"));
+      } catch (error) {
+        setStatus(`.gimoza の書き出しに失敗しました: ${error.message}`);
+      } finally {
+        exportInProgress = false;
+      }
     }
 
     el.fileInput.addEventListener("change", async (event) => {
@@ -2787,9 +3331,13 @@
       }
     });
 
-    el.buildGraphBtn.addEventListener("click", buildGraph);
-    el.extractBtn.addEventListener("click", extractPolygons);
-    el.exportBtn.addEventListener("click", exportJson);
+    // buildGraph / extractPolygons は失敗を呼び出し元へ投げる（書き出しが半端な state を
+    // 掴まないようにするため）。ボタンから直接押したときは、状態表示はすでに出ているので
+    // ここで受け止めて握りつぶす。
+    const runFromButton = (fn) => () => { fn().catch(() => {}); };
+    el.buildGraphBtn.addEventListener("click", runFromButton(buildGraph));
+    el.extractBtn.addEventListener("click", runFromButton(extractPolygons));
+    el.exportBtn.addEventListener("click", exportGimoza);
     el.clearBtn.addEventListener("click", () => {
       clearOverlays();
       setStatus("重ね表示を消去しました。");
@@ -2823,10 +3371,11 @@
 
     [el.showEdges, el.showPolys, el.showPoints].forEach((checkbox) => {
       checkbox.addEventListener("change", () => {
-        clearOverlays();
+        clearOverlays(true);
         drawEdges();
         drawPolygons();
         drawPoints();
+        updateSelectionDisplay();
       });
     });
 
