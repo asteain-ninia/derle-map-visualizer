@@ -452,6 +452,8 @@
       polygonsById: new Map(),
       wikiOutput: {
         pointVectors: null,
+        polygonRings: new Map(),
+        edgeChains: new Map(),
         polygonCenters: new Map(),
         coastVectors: null,
         landVectorPaths: [],
@@ -859,6 +861,37 @@
       };
     }
 
+    // 球面へ写す辺の長さの上限（経度・緯度の度）。地図上の直線は経緯度の直線なので、長い辺を
+    // 弦のまま球面へ写すと地図とずれる。地平線弧の回転角と真裏の点の内外判定（経緯度平面）が
+    // 食い違うと塗りが反転するため、球面へ写す前にこの長さ以下へ刻む。
+    const SPHERE_EDGE_MAX_DEG = 1;
+
+    // 地図座標の辺a→bを経緯度で SPHERE_EDGE_MAX_DEG 以下に刻む中間点（両端は含まない）。
+    function densifyMapSegment(a, b, vb) {
+      const spanDeg = Math.max(
+        (Math.abs(b.x - a.x) / vb.width) * 360,
+        (Math.abs(b.y - a.y) / vb.height) * 180,
+      );
+      const pieces = Math.ceil(spanDeg / SPHERE_EDGE_MAX_DEG);
+      const out = [];
+      for (let k = 1; k < pieces; k += 1) {
+        const t = k / pieces;
+        out.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+      }
+      return out;
+    }
+
+    // 閉じた点列の各辺（最後→最初を含む）を densifyMapSegment で刻む。
+    function densifyMapRing(points, vb) {
+      const out = [];
+      for (let i = 0; i < points.length; i += 1) {
+        const a = points[i];
+        out.push(a);
+        densifyMapSegment(a, points[(i + 1) % points.length], vb).forEach((p) => out.push(p));
+      }
+      return out;
+    }
+
     function applyTransform(point, element) {
       if (!el.measureSvg) return { x: point.x, y: point.y };
       const ctm = element.getCTM();
@@ -971,7 +1004,7 @@
               points = cleanPathPoints(samplePathElement(item, LAND_RETRY_STEP, subpath));
             }
             if (points.length < 3) return;
-            const vectors = points.map((pt) => mapPointToVector(pt, vb)).filter(Boolean);
+            const vectors = densifyMapRing(points, vb).map((pt) => mapPointToVector(pt, vb)).filter(Boolean);
             if (vectors.length >= 3) {
               vectorPaths.push(vectors);
             }
@@ -982,7 +1015,7 @@
           points = points.concat(points[0]);
           points = cleanPathPoints(points);
           if (points.length < 3) return;
-          const vectors = points.map((pt) => mapPointToVector(pt, vb)).filter(Boolean);
+          const vectors = densifyMapRing(points, vb).map((pt) => mapPointToVector(pt, vb)).filter(Boolean);
           if (vectors.length >= 3) {
             vectorPaths.push(vectors);
           }
@@ -992,7 +1025,7 @@
           points = points.concat(points[0]);
           points = cleanPathPoints(points);
           if (points.length < 3) return;
-          const vectors = points.map((pt) => mapPointToVector(pt, vb)).filter(Boolean);
+          const vectors = densifyMapRing(points, vb).map((pt) => mapPointToVector(pt, vb)).filter(Boolean);
           if (vectors.length >= 3) {
             vectorPaths.push(vectors);
           }
@@ -1155,6 +1188,8 @@
         cancelAnimationFrame(state.wikiOutput.animId);
       }
       state.wikiOutput.pointVectors = null;
+      state.wikiOutput.polygonRings = new Map();
+      state.wikiOutput.edgeChains = new Map();
       state.wikiOutput.polygonCenters = new Map();
       state.wikiOutput.coastVectors = null;
       state.wikiOutput.landVectorPaths = [];
@@ -1189,14 +1224,51 @@
         polygonCenters.set(String(poly.id), center);
       });
 
+      // 長い辺の中間点を pointVectors の後ろに足し、多角形と辺はそれを通る点列で球面へ写す
+      // （SPHERE_EDGE_MAX_DEG）。中間点は辺ごとに一度だけ作り、隣り合う多角形と境界線で共有する。
+      const edgeMidpoints = new Map();
+      const sphereEdgeChain = (a, b) => {
+        const lo = Math.min(a, b);
+        const hi = Math.max(a, b);
+        const key = `${lo},${hi}`;
+        let mids = edgeMidpoints.get(key);
+        if (!mids) {
+          mids = densifyMapSegment(state.graph.points[lo], state.graph.points[hi], vb).map((pt) => {
+            pointVectors.push(mapPointToVector(pt, vb));
+            return pointVectors.length - 1;
+          });
+          edgeMidpoints.set(key, mids);
+        }
+        return a < b ? mids : mids.slice().reverse();
+      };
+      const polygonRings = new Map();
+      state.polygons.forEach((poly) => {
+        const ring = [];
+        poly.points.forEach((idx, i) => {
+          ring.push(idx);
+          sphereEdgeChain(idx, poly.points[(i + 1) % poly.points.length]).forEach((mid) => ring.push(mid));
+        });
+        polygonRings.set(String(poly.id), ring);
+      });
+      const edgeChains = new Map();
+      state.graph.edges.forEach((edge) => {
+        edgeChains.set(edge, [edge.a, ...sphereEdgeChain(edge.a, edge.b), edge.b]);
+      });
+
       let coastVectors = null;
       if (state.rawCoastSegments && state.rawCoastSegments.length) {
-        coastVectors = state.rawCoastSegments
-          .map((seg) => ({ a: mapPointToVector(seg.a, vb), b: mapPointToVector(seg.b, vb) }))
-          .filter((seg) => seg.a && seg.b);
+        coastVectors = [];
+        state.rawCoastSegments.forEach((seg) => {
+          const chain = [seg.a, ...densifyMapSegment(seg.a, seg.b, vb), seg.b].map((pt) => mapPointToVector(pt, vb));
+          for (let i = 1; i < chain.length; i += 1) {
+            if (chain[i - 1] && chain[i]) coastVectors.push({ a: chain[i - 1], b: chain[i] });
+          }
+        });
       }
 
       state.wikiOutput.pointVectors = pointVectors;
+      state.wikiOutput.polygonRings = polygonRings;
+      state.wikiOutput.edgeChains = edgeChains;
       state.wikiOutput.polygonCenters = polygonCenters;
       state.wikiOutput.coastVectors = coastVectors;
       state.wikiOutput.landVectorPaths = collectLandVectorPaths(getLandSampleStep());
@@ -1322,98 +1394,208 @@
       return out;
     }
 
-    function addHorizonArc(output, exitPt, entryPt) {
-      const exitAngle = Math.atan2(exitPt.y, exitPt.x);
-      const entryAngle = Math.atan2(entryPt.y, entryPt.x);
-      let diff = entryAngle - exitAngle;
-      if (diff > Math.PI) diff -= 2 * Math.PI;
-      if (diff < -Math.PI) diff += 2 * Math.PI;
-      if (Math.abs(diff) < 1e-6) return;
-      const steps = Math.max(2, Math.ceil(Math.abs(diff) / (Math.PI / 36)));
+    // 地平線上をexitAngleからsweep（符号付き、πを超えてもよい）だけ回る弧の補間点を追加する（両端は含まない）。
+    function addHorizonArc(output, exitAngle, sweep) {
+      if (Math.abs(sweep) < 1e-6) return;
+      const steps = Math.max(2, Math.ceil(Math.abs(sweep) / (Math.PI / 36)));
       for (let s = 1; s < steps; s += 1) {
-        const angle = exitAngle + diff * (s / steps);
+        const angle = exitAngle + sweep * (s / steps);
         output.push({ x: Math.cos(angle), y: Math.sin(angle) });
       }
     }
 
-    function clipPolygonToHemisphere(indices, rotX, rotY, rotZ, projX, projY) {
+    // 不可視区間（出口→入口）を置き換える地平線弧を「短い方の弧の角度差diff + 2π×turns」の形で求める。
+    // 回転角は不可視区間の点列が視線軸まわりに回った角度に等しく、出口→入口の角度差に
+    // 基準半直線（回転後座標で y=0, x<0）を横切った符号付き回数crossTurns×2πを足して求める。
+    function buildHorizonArc(exitPt, entryPt, crossTurns) {
+      const exitAngle = Math.atan2(exitPt.y, exitPt.x);
+      let diff = Math.atan2(entryPt.y, entryPt.x) - exitAngle;
+      if (diff > Math.PI) diff -= 2 * Math.PI;
+      if (diff < -Math.PI) diff += 2 * Math.PI;
+      // 投影座標(x, y)=(回転後y, 回転後x)。基準半直線が分岐線になる角度 atan2(回転後y, 回転後x) で差を取り、投影座標の向きへ符号を戻す。
+      const sweep = -(Math.atan2(entryPt.x, entryPt.y) - Math.atan2(exitPt.x, exitPt.y) + 2 * Math.PI * crossTurns);
+      return { exitAngle, diff, turns: Math.round((sweep - diff) / (2 * Math.PI)) };
+    }
+
+    function horizonArcSweep(arc) {
+      return arc.diff + 2 * Math.PI * arc.turns;
+    }
+
+    // 視点中心の真裏の点の経緯度（ラジアン）。
+    function getBackLonLat(rotation) {
+      return {
+        lon: Math.atan2(-rotation.sinLon, -rotation.cosLon),
+        lat: -Math.atan2(rotation.sinLat, rotation.cosLat),
+      };
+    }
+
+    // 経緯度平面での点の内外判定（点から北へ伸ばした経線との交差回数）。
+    // 正距円筒図法の2D多角形と同じ内外になる（極や地図の上下端に接する多角形でも判定できる）。経度差は短い方で扱う。
+    function containsLonLat(indices, lonArr, latArr, lon, lat) {
+      let inside = false;
+      let prev = indices[indices.length - 1];
+      for (let i = 0; i < indices.length; i += 1) {
+        const curr = indices[i];
+        const a = normalizeAngle(lonArr[prev] - lon);
+        const b = a + normalizeAngle(lonArr[curr] - lonArr[prev]);
+        if ((a > 0) !== (b > 0)) {
+          const crossLat = latArr[prev] + (latArr[curr] - latArr[prev]) * (a / (a - b));
+          if (crossLat > lat) inside = !inside;
+        }
+        prev = curr;
+      }
+      return inside;
+    }
+
+    // 真裏の点Bの内外判定。2D地図から来た多角形は経緯度平面で閉じているので containsLonLat で判定する。
+    // 経度の巻き数が±1周の多角形（3Dで極を囲む輪。経緯度平面では閉じない）は、輪が分ける2領域のうち
+    // 面積の小さい方を内側とみなし、その側の極へ向かう経線とBからの交差回数で判定する。
+    function containsBackPoint(indices, lonArr, latArr, lon, lat) {
+      let winding = 0;
+      let capNorth = 0;
+      let prev = indices[indices.length - 1];
+      for (let i = 0; i < indices.length; i += 1) {
+        const curr = indices[i];
+        const dLon = normalizeAngle(lonArr[curr] - lonArr[prev]);
+        winding += dLon;
+        // 北極と辺の間の球面上の面積（符号付き）。
+        capNorth += dLon * (1 - Math.sin((latArr[prev] + latArr[curr]) / 2));
+        prev = curr;
+      }
+      if (Math.abs(winding) < Math.PI) {
+        return containsLonLat(indices, lonArr, latArr, lon, lat);
+      }
+      const northArea = Math.abs(capNorth);
+      const towardNorth = northArea <= 4 * Math.PI - northArea;
+      let crossings = 0;
+      prev = indices[indices.length - 1];
+      for (let i = 0; i < indices.length; i += 1) {
+        const curr = indices[i];
+        const a = normalizeAngle(lonArr[prev] - lon);
+        const b = a + normalizeAngle(lonArr[curr] - lonArr[prev]);
+        if ((a > 0) !== (b > 0)) {
+          const crossLat = latArr[prev] + (latArr[curr] - latArr[prev]) * (a / (a - b));
+          if (towardNorth ? crossLat > lat : crossLat < lat) crossings += 1;
+        }
+        prev = curr;
+      }
+      // 極側の領域の点は、極へ向かう経線が輪を偶数回横切る。
+      return crossings % 2 === 0;
+    }
+
+    function normalizeAngle(angle) {
+      if (angle > Math.PI) return angle - 2 * Math.PI;
+      if (angle <= -Math.PI) return angle + 2 * Math.PI;
+      return angle;
+    }
+
+    // 回転後座標で多角形を可視半球(z>=0)にクリップし、投影座標の点列を返す。
+    // 不可視区間は、その区間の点列が視線軸まわりに回った角度だけ地平線に沿って回る弧で置き換える
+    // （不可視区間が地平線の180°以上に回り込む場合も正しい向きになる）。
+    // さらに視点の真裏の点Bが多角形の内側にある場合は、弧の1本を逆回りにして内外を反転させる。
+    // lonArr/latArrは各点の経緯度（ラジアン）、backはBの経緯度。
+    function clipPolygonToHemisphere(indices, rotX, rotY, rotZ, projX, projY, lonArr, latArr, back) {
       if (!indices.length) return [];
-      const output = [];
+      // 点と弧（{ arc }）を順に並べ、最後に弧を補間点へ展開する。
+      const items = [];
+      const arcs = [];
       let lastExit = null;
       let firstEntry = null;
+      let crossTurns = 0;
+      let leadCrossTurns = 0;
+      const pushArc = (exitPt, entryPt, turns) => {
+        const arc = buildHorizonArc(exitPt, entryPt, turns);
+        arcs.push(arc);
+        items.push({ arc });
+      };
       let prev = indices[indices.length - 1];
       let prevInside = rotZ[prev] >= 0;
       for (let i = 0; i < indices.length; i += 1) {
         const curr = indices[i];
         const currInside = rotZ[curr] >= 0;
+        // 辺が不可視側で基準半直線（y=0, x<0）を横切った向き。
+        let crossTurn = 0;
+        if (!(prevInside && currInside) && (rotY[prev] > 0) !== (rotY[curr] > 0)) {
+          const t = rotY[prev] / (rotY[prev] - rotY[curr]);
+          const cx = rotX[prev] + t * (rotX[curr] - rotX[prev]);
+          const cz = rotZ[prev] + t * (rotZ[curr] - rotZ[prev]);
+          if (cx < 0 && cz < 0) crossTurn = rotY[prev] > 0 ? 1 : -1;
+        }
         if (prevInside && currInside) {
-          output.push({ x: projX[curr], y: projY[curr] });
+          items.push({ x: projX[curr], y: projY[curr] });
         } else if (prevInside && !currInside) {
           const hit = intersectRotatedIndices(prev, curr, rotX, rotY, rotZ);
           if (hit) {
-            output.push(hit);
+            items.push(hit);
             lastExit = hit;
           }
-        } else if (!prevInside && currInside) {
+          crossTurns = crossTurn;
+        } else if (!prevInside && !currInside) {
+          crossTurns += crossTurn;
+        } else {
+          crossTurns += crossTurn;
           const hit = intersectRotatedIndices(prev, curr, rotX, rotY, rotZ);
           if (hit) {
             if (lastExit) {
-              addHorizonArc(output, lastExit, hit);
+              pushArc(lastExit, hit, crossTurns);
               lastExit = null;
             } else if (!firstEntry) {
               firstEntry = hit;
+              leadCrossTurns = crossTurns;
             }
-            output.push(hit);
+            items.push(hit);
           }
-          output.push({ x: projX[curr], y: projY[curr] });
+          items.push({ x: projX[curr], y: projY[curr] });
+          crossTurns = 0;
         }
         prev = curr;
         prevInside = currInside;
       }
       if (lastExit && firstEntry) {
-        addHorizonArc(output, lastExit, firstEntry);
+        pushArc(lastExit, firstEntry, crossTurns + leadCrossTurns);
       }
+      if (arcs.length && containsBackPoint(indices, lonArr, latArr, back.lon, back.lat)) {
+        // 弧の回転角の総和の符号は、見えている外側領域を囲む向きを表す。
+        // その向きの弧のうち最も長いものを逆回り（1周分戻す）にして、内外を入れ替える。
+        const sign = arcs.reduce((sum, arc) => sum + horizonArcSweep(arc), 0) >= 0 ? 1 : -1;
+        let target = null;
+        arcs.forEach((arc) => {
+          const sweep = horizonArcSweep(arc) * sign;
+          if (sweep > 0 && (!target || sweep > horizonArcSweep(target) * sign)) target = arc;
+        });
+        if (target) target.turns -= sign;
+      }
+      const output = [];
+      items.forEach((item) => {
+        if (item.arc) {
+          addHorizonArc(output, item.arc.exitAngle, horizonArcSweep(item.arc));
+        } else {
+          output.push(item);
+        }
+      });
       return dedupePoints(output);
     }
 
     function clipPolygonVectors(vectors, rotation) {
       if (!vectors.length) return [];
-      const output = [];
-      let lastExit = null;
-      let firstEntry = null;
-      let prev = rotateVector(vectors[vectors.length - 1], rotation);
-      let prevInside = prev.z >= 0;
-      for (let i = 0; i < vectors.length; i += 1) {
-        const curr = rotateVector(vectors[i], rotation);
-        const currInside = curr.z >= 0;
-        if (prevInside && currInside) {
-          output.push(projectRotated(curr));
-        } else if (prevInside && !currInside) {
-          const hit = intersectRotatedVectors(prev, curr);
-          if (hit) {
-            output.push(hit);
-            lastExit = hit;
-          }
-        } else if (!prevInside && currInside) {
-          const hit = intersectRotatedVectors(prev, curr);
-          if (hit) {
-            if (lastExit) {
-              addHorizonArc(output, lastExit, hit);
-              lastExit = null;
-            } else if (!firstEntry) {
-              firstEntry = hit;
-            }
-            output.push(hit);
-          }
-          output.push(projectRotated(curr));
-        }
-        prev = curr;
-        prevInside = currInside;
+      const count = vectors.length;
+      const indices = new Array(count);
+      const rotX = new Float64Array(count);
+      const rotY = new Float64Array(count);
+      const rotZ = new Float64Array(count);
+      const lonArr = new Float64Array(count);
+      const latArr = new Float64Array(count);
+      for (let i = 0; i < count; i += 1) {
+        const v = vectors[i];
+        const r = rotateVector(v, rotation);
+        indices[i] = i;
+        rotX[i] = r.x;
+        rotY[i] = r.y;
+        rotZ[i] = r.z;
+        lonArr[i] = Math.atan2(v.y, v.x);
+        latArr[i] = Math.atan2(v.z, Math.hypot(v.x, v.y));
       }
-      if (lastExit && firstEntry) {
-        addHorizonArc(output, lastExit, firstEntry);
-      }
-      return dedupePoints(output);
+      return clipPolygonToHemisphere(indices, rotX, rotY, rotZ, rotY, rotX, lonArr, latArr, getBackLonLat(rotation));
     }
 
     function formatCoord(value) {
@@ -1431,23 +1613,28 @@
 
     function buildEdgePath(edges, predicate, rotX, rotY, rotZ, projX, projY) {
       const parts = [];
+      const edgeChains = state.wikiOutput.edgeChains;
       edges.forEach((edge) => {
         if (!predicate(edge)) return;
-        const a = edge.a;
-        const b = edge.b;
-        const zA = rotZ[a];
-        const zB = rotZ[b];
-        if (zA >= 0 && zB >= 0) {
-          parts.push(`M${formatCoord(projX[a])} ${formatCoord(projY[a])} L${formatCoord(projX[b])} ${formatCoord(projY[b])}`);
-          return;
-        }
-        if (zA >= 0 || zB >= 0) {
-          const hit = intersectRotatedIndices(a, b, rotX, rotY, rotZ);
-          if (!hit) return;
-          if (zA >= 0) {
-            parts.push(`M${formatCoord(projX[a])} ${formatCoord(projY[a])} L${formatCoord(hit.x)} ${formatCoord(hit.y)}`);
-          } else {
-            parts.push(`M${formatCoord(hit.x)} ${formatCoord(hit.y)} L${formatCoord(projX[b])} ${formatCoord(projY[b])}`);
+        // 長い辺は buildWikipediaCache で刻んだ中間点を通す（塗りの輪郭と線を一致させる）。
+        const chain = edgeChains.get(edge) || [edge.a, edge.b];
+        for (let i = 1; i < chain.length; i += 1) {
+          const a = chain[i - 1];
+          const b = chain[i];
+          const zA = rotZ[a];
+          const zB = rotZ[b];
+          if (zA >= 0 && zB >= 0) {
+            parts.push(`M${formatCoord(projX[a])} ${formatCoord(projY[a])} L${formatCoord(projX[b])} ${formatCoord(projY[b])}`);
+            continue;
+          }
+          if (zA >= 0 || zB >= 0) {
+            const hit = intersectRotatedIndices(a, b, rotX, rotY, rotZ);
+            if (!hit) continue;
+            if (zA >= 0) {
+              parts.push(`M${formatCoord(projX[a])} ${formatCoord(projY[a])} L${formatCoord(hit.x)} ${formatCoord(hit.y)}`);
+            } else {
+              parts.push(`M${formatCoord(hit.x)} ${formatCoord(hit.y)} L${formatCoord(projX[b])} ${formatCoord(projY[b])}`);
+            }
           }
         }
       });
@@ -1585,9 +1772,14 @@
       const rotZ = new Float64Array(count);
       const projX = new Float64Array(count);
       const projY = new Float64Array(count);
+      const lonArr = new Float64Array(count);
+      const latArr = new Float64Array(count);
+      const back = getBackLonLat(rotation);
 
       for (let i = 0; i < count; i += 1) {
         const v = pointVectors[i];
+        lonArr[i] = Math.atan2(v.y, v.x);
+        latArr[i] = Math.atan2(v.z, Math.hypot(v.x, v.y));
         const x1 = rotation.cosLon * v.x + rotation.sinLon * v.y;
         const y1 = -rotation.sinLon * v.x + rotation.cosLon * v.y;
         const z1 = v.z;
@@ -1604,8 +1796,10 @@
       const allPolygonPaths = [];
       const selectedPolygonPaths = [];
       const wikiSelection = resolveWikiSelection();
+      const polygonRings = state.wikiOutput.polygonRings;
       state.polygons.forEach((poly) => {
-        const clipped = clipPolygonToHemisphere(poly.points, rotX, rotY, rotZ, projX, projY);
+        const ring = polygonRings.get(String(poly.id)) || poly.points;
+        const clipped = clipPolygonToHemisphere(ring, rotX, rotY, rotZ, projX, projY, lonArr, latArr, back);
         if (clipped.length < 3) return;
         const d = buildPathFromPoints(clipped);
         if (!d) return;
