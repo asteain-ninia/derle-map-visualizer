@@ -1516,6 +1516,308 @@
     return { parents, owners };
   }
 
+  // ---- 経度180度の継ぎ目（地図の西端・東端）----
+  // frame: 正距円筒図法で経度-180〜+180・緯度+90〜-90に対応する矩形 {x, y, width, height}
+
+  // 地図枠の外側にはみ出した点は、内側の許容値のこの倍数まで端に乗っているとみなす。
+  // 作図が枠をわずかにはみ出すことがあり（BUR080809 では南極の切断線が枠の 0.07 外）、
+  // 枠の外の点は端に揃えるしかないので、端に斜めに近づく海岸線を巻き込まないよう狭くしている内側より緩くしてよい。
+  const SEAM_OUTSIDE_FACTOR = 20;
+
+  // 点が地図枠の西端/東端のどちらに乗っているか（内側tol以内、外側tol×SEAM_OUTSIDE_FACTOR以内）。"W" / "E" / null
+  function seamSideOf(point, frame, tol) {
+    if (!point || !frame) return null;
+    const west = frame.x;
+    const east = frame.x + frame.width;
+    const outside = tol * SEAM_OUTSIDE_FACTOR;
+    if (point.x <= west + tol && point.x >= west - outside) return "W";
+    if (point.x >= east - tol && point.x <= east + outside) return "E";
+    return null;
+  }
+
+  // 西端/東端からtol以内の点のxを枠の端ちょうどに揃える（pointsを直接書き換える）。揃えた点数を返す。
+  // indicesを渡すとその点だけを対象にする。
+  function snapPointsToSeam(points, frame, tol, indices) {
+    if (!points || !frame || !(tol >= 0)) return 0;
+    const west = frame.x;
+    const east = frame.x + frame.width;
+    let count = 0;
+    const visit = (p) => {
+      if (!p) return;
+      const side = seamSideOf(p, frame, tol);
+      if (side === "W") {
+        if (p.x !== west) count += 1;
+        p.x = west;
+      } else if (side === "E") {
+        if (p.x !== east) count += 1;
+        p.x = east;
+      }
+    };
+    if (indices) {
+      indices.forEach((i) => visit(points[i]));
+    } else {
+      points.forEach(visit);
+    }
+    return count;
+  }
+
+  // 両端点が同じ側の地図端に乗っている辺（地図端に沿う辺）か。"W" / "E" / null
+  function seamEdgeSide(a, b, frame, tol) {
+    const sa = seamSideOf(a, frame, tol);
+    if (!sa) return null;
+    return seamSideOf(b, frame, tol) === sa ? sa : null;
+  }
+
+  // ---- 区間（y範囲）演算: [[y0, y1], ...] を昇順・非重複で扱う ----
+  function mergeIntervals(intervals, gap) {
+    const list = intervals.filter((iv) => iv[1] > iv[0]).map((iv) => iv.slice()).sort((p, q) => p[0] - q[0]);
+    if (!list.length) return [];
+    const g = gap || 0;
+    const out = [list[0]];
+    for (let i = 1; i < list.length; i += 1) {
+      const last = out[out.length - 1];
+      const cur = list[i];
+      if (cur[0] <= last[1] + g) {
+        if (cur[1] > last[1]) last[1] = cur[1];
+      } else {
+        out.push(cur);
+      }
+    }
+    return out;
+  }
+
+  function intersectIntervals(a, b) {
+    const out = [];
+    let i = 0;
+    let j = 0;
+    while (i < a.length && j < b.length) {
+      const lo = Math.max(a[i][0], b[j][0]);
+      const hi = Math.min(a[i][1], b[j][1]);
+      if (hi > lo) out.push([lo, hi]);
+      if (a[i][1] < b[j][1]) i += 1; else j += 1;
+    }
+    return out;
+  }
+
+  function subtractIntervals(a, b) {
+    const out = [];
+    a.forEach((iv) => {
+      let pieces = [iv.slice()];
+      b.forEach((cut) => {
+        const next = [];
+        pieces.forEach((p) => {
+          if (cut[1] <= p[0] || cut[0] >= p[1]) {
+            next.push(p);
+            return;
+          }
+          if (cut[0] > p[0]) next.push([p[0], cut[0]]);
+          if (cut[1] < p[1]) next.push([cut[1], p[1]]);
+        });
+        pieces = next;
+      });
+      pieces.forEach((p) => out.push(p));
+    });
+    return mergeIntervals(out, 0);
+  }
+
+  function intervalsContain(intervals, y) {
+    for (let i = 0; i < intervals.length; i += 1) {
+      if (y > intervals[i][0] && y < intervals[i][1]) return true;
+    }
+    return false;
+  }
+
+  // 地図端に乗る辺の区間を側ごとに集める。filter(edge)がtrueの辺だけ対象。
+  function collectSeamEdgeIntervals(edges, points, frame, tol, filter) {
+    const W = [];
+    const E = [];
+    edges.forEach((edge) => {
+      if (filter && !filter(edge)) return;
+      const a = points[edge.a];
+      const b = points[edge.b];
+      const side = seamEdgeSide(a, b, frame, tol);
+      if (!side) return;
+      (side === "W" ? W : E).push([Math.min(a.y, b.y), Math.max(a.y, b.y)]);
+    });
+    return { W: mergeIntervals(W, tol), E: mergeIntervals(E, tol) };
+  }
+
+  // 地図の西端・東端に「枠」の仮想辺（sources: frame）を追加する。
+  // 端に乗る点をyで並べ、隣り合う点の間がまだどの辺にも覆われていなければ辺を張る。
+  // これにより、地図端で切れた海上国境（海の領域）も面として閉じる。冪等。追加した辺の数を返す。
+  function addSeamFrameEdges(graph, frame, tol) {
+    const { points, edges } = graph;
+    const existing = new Set(edges.map((e) => (e.a < e.b ? `${e.a}-${e.b}` : `${e.b}-${e.a}`)));
+    const covered = collectSeamEdgeIntervals(edges, points, frame, tol, null);
+    const bySide = { W: [], E: [] };
+    points.forEach((p, idx) => {
+      const side = seamSideOf(p, frame, tol);
+      if (side) bySide[side].push(idx);
+    });
+    let added = 0;
+    ["W", "E"].forEach((side) => {
+      const list = bySide[side].sort((i, j) => points[i].y - points[j].y);
+      for (let k = 0; k + 1 < list.length; k += 1) {
+        const a = list[k];
+        const b = list[k + 1];
+        const ya = points[a].y;
+        const yb = points[b].y;
+        if (yb - ya <= EPS) continue;
+        if (intervalsContain(covered[side], (ya + yb) / 2)) continue;
+        const key = a < b ? `${a}-${b}` : `${b}-${a}`;
+        if (existing.has(key)) continue;
+        existing.add(key);
+        edges.push({ a, b, sources: new Set(["frame"]) });
+        added += 1;
+      }
+    });
+    return added;
+  }
+
+  // 地図端の区間を分類する。
+  // - border: 国境線（sourcesにborder）が端に沿って引かれている区間（西・東どちらか一方にあれば両側に適用）→ 本物の国境
+  // - realCoast: 片側だけ海岸線で、反対側の同じyは海 → 経度180度上の本物の海岸線
+  // - cut: それ以外（両側とも陸の切断線、または両側とも海）→ 人工的な切断。左右のポリゴンを同一地物として扱う
+  // options.mismatchTol: 両側とも陸の区間に隣接する、この長さ以下の「片側だけ陸」の区間は
+  //   描画上の位置ずれ（実データでは左右のピースが約3pxずれている）とみなして切断線に含める。既定は枠の高さの0.5%。
+  function analyzeSeam(graph, frame, tol, options) {
+    const { points, edges } = graph;
+    const mismatchTol = options && Number.isFinite(options.mismatchTol) ? options.mismatchTol : frame.height * 0.005;
+    const border = collectSeamEdgeIntervals(edges, points, frame, tol, (e) => e.sources.has("border"));
+    const coast = collectSeamEdgeIntervals(edges, points, frame, tol,
+      (e) => !e.sources.has("border") && e.sources.has("coast"));
+    const borderAny = mergeIntervals(border.W.concat(border.E), tol);
+    const landBoth = intersectIntervals(coast.W, coast.E);
+    const touchesLandBoth = (iv) => landBoth.some((lb) => Math.abs(lb[0] - iv[1]) <= tol || Math.abs(lb[1] - iv[0]) <= tol);
+    const dropMismatch = (list) => list.filter((iv) => !(iv[1] - iv[0] <= mismatchTol && touchesLandBoth(iv)));
+    const realCoast = {
+      W: dropMismatch(subtractIntervals(subtractIntervals(coast.W, coast.E), borderAny)),
+      E: dropMismatch(subtractIntervals(subtractIntervals(coast.E, coast.W), borderAny)),
+    };
+    const blocked = mergeIntervals(borderAny.concat(realCoast.W, realCoast.E), 0);
+    const cut = subtractIntervals([[frame.y, frame.y + frame.height]], blocked);
+    return { border, coast, borderAny, landBoth, realCoast, cut };
+  }
+
+  // 地図端の辺 a→b のうち、人工的な切断区間（seam.cut）に乗らない部分を [[p, q], ...] で返す（向きは a→b のまま）。
+  // 1 本の辺が切断区間と本物の海岸線（realCoast）や国境の区間にまたがることがあるので（polygon/polyline の長い辺は
+  // 反対側の端点の位置で分割されない）、辺全体を中点で判定せず、区間の境界で切って人工的な部分だけを落とす。
+  // 地図端に乗らない辺はそのまま返す。tol 以下の切れ端は捨てる。
+  function seamStrokeParts(a, b, frame, tol, seam) {
+    if (!seam || !seamEdgeSide(a, b, frame, tol)) return [[a, b]];
+    const y0 = Math.min(a.y, b.y);
+    const y1 = Math.max(a.y, b.y);
+    if (y1 - y0 <= EPS) return [[a, b]];
+    const keep = subtractIntervals([[y0, y1]], seam.cut).filter((iv) => iv[1] - iv[0] > tol);
+    const at = (y) => {
+      if (y === a.y) return a;
+      if (y === b.y) return b;
+      const t = (y - a.y) / (b.y - a.y);
+      return { x: a.x + (b.x - a.x) * t, y };
+    };
+    const parts = keep.map(([lo, hi]) => (a.y <= b.y ? [at(lo), at(hi)] : [at(hi), at(lo)]));
+    if (a.y > b.y) parts.reverse();
+    return parts;
+  }
+
+  // 辺(a, b)が全体として地図端上の人工的な切断線か（seamはanalyzeSeamの結果）。
+  // 一部でも本物の海岸線・国境の区間を含む辺は false（国タイプ判定で境界として数える）。描画は seamStrokeParts で切り分ける。
+  function isArtificialSeamEdge(a, b, frame, tol, seam) {
+    if (!seam) return false;
+    if (!seamEdgeSide(a, b, frame, tol)) return false;
+    return seamStrokeParts(a, b, frame, tol, seam).length === 0;
+  }
+
+  // 枠の仮想辺だけで海側を閉じた面（国境線を含まない）か。地図端で陸が複数回接するときにできる
+  // 「切断線と海岸線に囲まれた海」は実在の領域ではないので除外に使う。getSources(a, b)は辺のsourcesを返す。
+  function isFrameOnlySeaFace(ring, getSources) {
+    let hasFrameOnly = false;
+    for (let i = 0; i < ring.length; i += 1) {
+      const sources = getSources(ring[i], ring[(i + 1) % ring.length]);
+      if (!sources) continue;
+      if (sources.has("border")) return false;
+      if (sources.has("frame") && sources.size === 1) hasFrameOnly = true;
+    }
+    return hasFrameOnly;
+  }
+
+  // 各ポリゴン（rings: 点インデックス列の配列）が地図端の人工的な切断区間（cut）に接する区間を求める。
+  function collectSeamRuns(polygons, points, frame, tol, cut) {
+    return polygons.map((poly) => {
+      const west = [];
+      const east = [];
+      const rings = poly.rings || [poly.points];
+      rings.forEach((ring) => {
+        for (let i = 0; i < ring.length; i += 1) {
+          const a = points[ring[i]];
+          const b = points[ring[(i + 1) % ring.length]];
+          const side = seamEdgeSide(a, b, frame, tol);
+          if (!side) continue;
+          (side === "W" ? west : east).push([Math.min(a.y, b.y), Math.max(a.y, b.y)]);
+        }
+      });
+      let W = mergeIntervals(west, tol);
+      let E = mergeIntervals(east, tol);
+      if (cut) {
+        W = intersectIntervals(W, cut);
+        E = intersectIntervals(E, cut);
+      }
+      return { west: W, east: E };
+    });
+  }
+
+  // 西端の区間と東端の区間が「同じ切断線」とみなせるポリゴン同士をまとめる（union-find、推移的）。
+  // 条件: 重なりが短い方の区間長のminOverlapRatio以上、かつ上端・下端の差がどちらもendTol以内。
+  // （海上国境が両端でわずかに違うyに当たる場合に、別の国同士をつながないため）
+  // options.cut を渡すと人工的な切断区間（analyzeSeam().cut）に限定する。
+  // 返り値: groups = 2個以上のポリゴンからなるグループ（ポリゴン添字の配列）、links = 判定根拠。
+  function groupSeamPolygons(polygons, points, frame, options) {
+    const opts = options || {};
+    const tol = Number.isFinite(opts.tol) ? opts.tol : 0;
+    const ratio = Number.isFinite(opts.minOverlapRatio) ? opts.minOverlapRatio : 0.5;
+    const endTol = Number.isFinite(opts.endTol) ? opts.endTol : frame.height * 0.005;
+    const runs = collectSeamRuns(polygons, points, frame, tol, opts.cut || null);
+    const parent = polygons.map((_, i) => i);
+    const find = (i) => {
+      let r = i;
+      while (parent[r] !== r) r = parent[r];
+      while (parent[i] !== r) {
+        const next = parent[i];
+        parent[i] = r;
+        i = next;
+      }
+      return r;
+    };
+    const links = [];
+    const eastRuns = [];
+    runs.forEach((r, idx) => r.east.forEach((iv) => eastRuns.push({ idx, iv })));
+    runs.forEach((r, wIdx) => {
+      r.west.forEach((w) => {
+        eastRuns.forEach(({ idx: eIdx, iv: e }) => {
+          const overlap = Math.min(w[1], e[1]) - Math.max(w[0], e[0]);
+          if (overlap <= 0) return;
+          const shorter = Math.min(w[1] - w[0], e[1] - e[0]);
+          if (overlap < ratio * shorter) return;
+          if (Math.abs(w[0] - e[0]) > endTol || Math.abs(w[1] - e[1]) > endTol) return;
+          links.push({ west: wIdx, east: eIdx, westRun: w, eastRun: e, overlap });
+          if (wIdx !== eIdx) {
+            const ra = find(wIdx);
+            const rb = find(eIdx);
+            if (ra !== rb) parent[Math.max(ra, rb)] = Math.min(ra, rb);
+          }
+        });
+      });
+    });
+    const byRoot = new Map();
+    polygons.forEach((_, i) => {
+      const root = find(i);
+      if (!byRoot.has(root)) byRoot.set(root, []);
+      byRoot.get(root).push(i);
+    });
+    const groups = Array.from(byRoot.values()).filter((g) => g.length > 1);
+    return { groups, links, runs };
+  }
+
   global.DerleLogic = {
     setMeasureSvg,
     nextFrame,
@@ -1539,5 +1841,20 @@
     computeOwnership,
     computeContainment,
     OWNING_TYPES,
+    // 経度180度の継ぎ目（地図の西端・東端）
+    seamSideOf,
+    seamEdgeSide,
+    snapPointsToSeam,
+    mergeIntervals,
+    intersectIntervals,
+    subtractIntervals,
+    intervalsContain,
+    addSeamFrameEdges,
+    analyzeSeam,
+    isArtificialSeamEdge,
+    seamStrokeParts,
+    isFrameOnlySeaFace,
+    collectSeamRuns,
+    groupSeamPolygons,
   };
 })(window);

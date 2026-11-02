@@ -1363,6 +1363,7 @@
    *   types           … state.polygonTypes (Map) など。面 index → 種別名 に均される
    *   svgDoc          … DOMParser で読んだ元 SVG (ラベルと世界矩形の取得に使う)
    *   countryPolygons … 階層化用の国レベル抽出 {points, polygons, types}。省略時はフラット
+   *   seamGroups      … 経度180度の継ぎ目でつないだ同じ地物のピース id の配列の配列（名前を揃える）
    *   options         … cleanupEpsilon (既定 0.02) / projectName / equatorKm / log ほか
    */
   function buildManifest(input) {
@@ -1685,6 +1686,29 @@
       }
     }
 
+    // 6a'. 経度180度の継ぎ目でつないだ地物（visualizer 側で 1 地物として扱うもの）。
+    // .gimoza の地物は平面上の「領域リング＋穴」なので、ピースごとの地物として書き出し、名前を揃える。
+    // 先頭のピースを代表にし、どのピースに載ったラベルも代表に集める。
+    const seamLeaderOf = new Array(activePolygons.length).fill(-1);
+    {
+      const indexOfId = new Map(activePolygons.map((p, i) => [String(p.id), i]));
+      for (const ids of input.seamGroups || []) {
+        const members = ids.map((id) => indexOfId.get(String(id))).filter((i) => i !== undefined);
+        if (members.length < 2) continue;
+        const leader = Math.min(...members);
+        for (const m of members) {
+          if (m === leader) continue;
+          seamLeaderOf[m] = leader;
+          if (nameOf[leader] === null && nameOf[m] !== null) nameOf[leader] = nameOf[m];
+          for (const list of [stateNamesOf, placeNamesOf, seaNamesOf, regionNamesOf]) {
+            for (const n of list[m]) if (!list[leader].includes(n)) list[leader].push(n);
+          }
+        }
+        log(`経度180度の継ぎ目: 面 ${members.map((i) => activePolygons[i].id).join(", ")} を同じ名前で書き出す`);
+      }
+    }
+    const finalNameOf = new Array(activePolygons.length).fill(null);
+
     // 6b. 地物と履歴の構築
     const histories = [];
     const typeCounters = {};
@@ -1784,6 +1808,11 @@
       } else {
         name = nameOf[i];
       }
+      if (seamLeaderOf[i] !== -1 && finalNameOf[seamLeaderOf[i]] !== null
+        && !finalNameOf[seamLeaderOf[i]].startsWith("__CHILD_")) {
+        // 継ぎ目でつないだ地物の 2 つ目以降のピース: 代表と同じ名前（仮名の連番も消費しない）
+        name = finalNameOf[seamLeaderOf[i]];
+      }
       if (name === null && (p.type === "島国" || p.type === "完全島国") && regionNamesOf[i].length > 0) {
         // 島は内側の地名 (島の固有名) をそのまま仮名に使う (最大 2 件連結)。島以外の
         // 陸域は直接命名しない (隣の沿岸国に載った島名での誤命名を防ぐ) — 後段の
@@ -1824,6 +1853,7 @@
         name = `${prefix}${pad(typeCounters[prefix], 3)}`;
       }
 
+      finalNameOf[i] = name;
       const feature = {
         kind: "leaf",
         id: fid,

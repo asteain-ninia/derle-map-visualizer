@@ -422,6 +422,7 @@
       baseSvg: null,
       overlaySvg: null,
       viewBox: null,
+      mapFrame: null,
       graph: null,
       polygons: [],
       polygonsGroup: null,
@@ -450,6 +451,9 @@
       layerCheckboxes: new Map(),
       otherLayerElements: [],
       polygonsById: new Map(),
+      seam: null,
+      seamFeatures: [],
+      polygonPieces: [],
       wikiOutput: {
         pointVectors: null,
         polygonRings: new Map(),
@@ -621,21 +625,35 @@
       return inside;
     }
 
+    // ポリゴンの外周リング列。経度180度の継ぎ目でつながった地物は複数のリング（ピース）を持つ。
+    function getPolygonRings(poly) {
+      return poly.rings || [poly.points];
+    }
+
     function buildPolygonData(polygons, points) {
       return polygons.map((poly) => {
-        let minX = Infinity;
-        let minY = Infinity;
-        let maxX = -Infinity;
-        let maxY = -Infinity;
-        for (let i = 0; i < poly.points.length; i += 1) {
-          const p = points[poly.points[i]];
-          if (!p) continue;
-          if (p.x < minX) minX = p.x;
-          if (p.y < minY) minY = p.y;
-          if (p.x > maxX) maxX = p.x;
-          if (p.y > maxY) maxY = p.y;
-        }
-        return { points: poly.points, minX, minY, maxX, maxY };
+        const rings = getPolygonRings(poly).map((ring) => {
+          let minX = Infinity;
+          let minY = Infinity;
+          let maxX = -Infinity;
+          let maxY = -Infinity;
+          for (let i = 0; i < ring.length; i += 1) {
+            const p = points[ring[i]];
+            if (!p) continue;
+            if (p.x < minX) minX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y > maxY) maxY = p.y;
+          }
+          return { points: ring, minX, minY, maxX, maxY };
+        });
+        return {
+          rings,
+          minX: Math.min(...rings.map((r) => r.minX)),
+          minY: Math.min(...rings.map((r) => r.minY)),
+          maxX: Math.max(...rings.map((r) => r.maxX)),
+          maxY: Math.max(...rings.map((r) => r.maxY)),
+        };
       });
     }
 
@@ -646,8 +664,15 @@
           || point.y < poly.minY - tol || point.y > poly.maxY + tol) {
           continue;
         }
-        if (pointInPolygon(point, poly.points, points, tol)) {
-          return i;
+        for (let r = 0; r < poly.rings.length; r += 1) {
+          const ring = poly.rings[r];
+          if (point.x < ring.minX - tol || point.x > ring.maxX + tol
+            || point.y < ring.minY - tol || point.y > ring.maxY + tol) {
+            continue;
+          }
+          if (pointInPolygon(point, ring.points, points, tol)) {
+            return i;
+          }
         }
       }
       return -1;
@@ -847,10 +872,56 @@
       seaShadow: "#DDDDDD",
     };
 
-    function mapPointToVector(point, vb) {
-      if (!point || !vb) return null;
-      const lon = ((point.x - vb.x) / vb.width) * 360 - 180;
-      const lat = 90 - ((point.y - vb.y) / vb.height) * 180;
+    // 地図枠: 正距円筒図法で経度-180〜+180・緯度+90〜-90に対応する矩形。
+    // Illustrator出力ではviewBoxに余白があり、海レイヤー（_海）の矩形が実際の地図範囲になっている
+    // （陸の切断線もこの端に乗る。.gimoza の書き出し（gimoza.js の worldRectFromSvg）も同じ矩形を世界矩形にしている）。
+    // 海の矩形が2:1かつviewBoxの大半を覆う場合はそれを採用し、見つからなければviewBoxにフォールバックする。
+    function resolveMapFrame(svgRoot, viewBoxText) {
+      const vb = parseViewBox(viewBoxText);
+      if (!vb) return null;
+      const seaLayer = svgRoot
+        ? (svgRoot.querySelector("[id='_海']") || svgRoot.querySelector("[data-name='海']"))
+        : null;
+      if (seaLayer) {
+        let best = null;
+        seaLayer.querySelectorAll("rect").forEach((rect) => {
+          const x = Number(rect.getAttribute("x")) || 0;
+          const y = Number(rect.getAttribute("y")) || 0;
+          const width = Number(rect.getAttribute("width")) || 0;
+          const height = Number(rect.getAttribute("height")) || 0;
+          if (width <= 0 || height <= 0) return;
+          if (!best || width * height > best.width * best.height) best = { x, y, width, height };
+        });
+        if (best
+          && Math.abs(best.width / best.height - 2) <= 0.02
+          && best.width >= vb.width * 0.9
+          && best.height >= vb.height * 0.9) {
+          return { ...best, source: "sea" };
+        }
+      }
+      return { ...vb, source: "viewBox" };
+    }
+
+    function getMapFrame() {
+      return state.mapFrame || parseViewBox(state.viewBox);
+    }
+
+    // 地図端（経度±180度）に乗っているとみなす距離（枠の内側。外側はこの20倍まで: logic.js の SEAM_OUTSIDE_FACTOR）。
+    // 実データ（BUR080809）では南極の切断線が西端の 0.07 外・東端の 0.07 内にあり（両端とも同じだけ左へずれている）、
+    // これを吸収しつつ、端に斜めに近づく海岸線は巻き込まない値にしている（端に最も近い非切断の頂点は約 1.3 内側）。
+    function getSeamTolerance(frame) {
+      const f = frame || getMapFrame();
+      return f ? Math.max(0.1, f.width * 1e-5) : 0.1;
+    }
+
+    function mapPointToVector(point, frame) {
+      if (!point || !frame) return null;
+      const tol = getSeamTolerance(frame);
+      let lon = ((point.x - frame.x) / frame.width) * 360 - 180;
+      const side = DerleLogic.seamSideOf(point, frame, tol);
+      if (side === "W") lon = -180;
+      else if (side === "E") lon = 180;
+      const lat = Math.max(-90, Math.min(90, 90 - ((point.y - frame.y) / frame.height) * 180));
       const lonRad = degToRad(lon);
       const latRad = degToRad(lat);
       const cosLat = Math.cos(latRad);
@@ -975,7 +1046,7 @@
 
     function collectLandVectorPaths(step) {
       if (!state.baseSvg) return [];
-      const vb = parseViewBox(state.viewBox);
+      const vb = getMapFrame();
       if (!vb) return [];
       const vectorPaths = [];
 
@@ -1094,35 +1165,46 @@
       return value.toFixed(2);
     }
 
-    function computeAndDisplayArea() {
-      if (!el.areaGroup || !el.areaDisplay) return;
-      if (!state.selectedPolygons.size || !state.graph) {
-        el.areaGroup.style.display = "none";
-        return;
+    function clusterBoxes(boxes) {
+      const parent = boxes.map((_, i) => i);
+      const find = (i) => {
+        while (parent[i] !== i) {
+          parent[i] = parent[parent[i]];
+          i = parent[i];
+        }
+        return i;
+      };
+      for (let i = 0; i < boxes.length; i += 1) {
+        for (let j = i + 1; j < boxes.length; j += 1) {
+          const a = boxes[i];
+          const b = boxes[j];
+          if (a.maxX < b.minX || b.maxX < a.minX || a.maxY < b.minY || b.maxY < a.minY) continue;
+          const ra = find(i);
+          const rb = find(j);
+          if (ra !== rb) parent[rb] = ra;
+        }
       }
-      const vb = parseViewBox(state.viewBox);
-      if (!vb) { el.areaGroup.style.display = "none"; return; }
-
-      const selectedPolys = [];
-      state.selectedPolygons.forEach((id) => {
-        const poly = state.polygonsById.get(id);
-        if (poly) selectedPolys.push(poly);
+      const groups = new Map();
+      boxes.forEach((box, i) => {
+        const root = find(i);
+        if (!groups.has(root)) groups.set(root, []);
+        groups.get(root).push(box);
       });
-      if (!selectedPolys.length) { el.areaGroup.style.display = "none"; return; }
+      return Array.from(groups.values());
+    }
 
+    // リング群（boxes: {ring, minX, minY, maxX, maxY}）の総面積・陸域面積をCanvasのピクセル重ね合わせで求める。
+    function measureRingsArea(boxes, vb) {
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      selectedPolys.forEach((poly) => {
-        poly.points.forEach((idx) => {
-          const p = state.graph.points[idx];
-          if (p.x < minX) minX = p.x;
-          if (p.y < minY) minY = p.y;
-          if (p.x > maxX) maxX = p.x;
-          if (p.y > maxY) maxY = p.y;
-        });
+      boxes.forEach((box) => {
+        if (box.minX < minX) minX = box.minX;
+        if (box.minY < minY) minY = box.minY;
+        if (box.maxX > maxX) maxX = box.maxX;
+        if (box.maxY > maxY) maxY = box.maxY;
       });
       const bboxW = maxX - minX;
       const bboxH = maxY - minY;
-      if (bboxW <= 0 || bboxH <= 0) { el.areaGroup.style.display = "none"; return; }
+      if (bboxW <= 0 || bboxH <= 0) return { totalArea: 0, landArea: 0 };
 
       const maxDim = 800;
       const scl = maxDim / Math.max(bboxW, bboxH);
@@ -1136,8 +1218,8 @@
       // 選択ポリゴンは1つのパスにまとめて1回で塗る（別々に塗ると隣接ポリゴンの共有境界でアンチエイリアスのアルファが重なり、被覆率が1未満になる）。
       // 向きを揃えて非ゼロ規則で塗ることで、共有境界は継ぎ目なく、重なり（包領など）は和集合として塗られる。
       ctx1.beginPath();
-      selectedPolys.forEach((poly) => {
-        const pts = poly.points.map((idx) => state.graph.points[idx]);
+      boxes.forEach((box) => {
+        const pts = box.ring.map((idx) => state.graph.points[idx]);
         let signed = 0;
         for (let i = 0; i < pts.length; i += 1) {
           const a = pts[i];
@@ -1189,6 +1271,51 @@
         }
       }
       if (!hasLand) landArea = totalArea;
+      return { totalArea, landArea };
+
+    }
+
+    function computeAndDisplayArea() {
+      if (!el.areaGroup || !el.areaDisplay) return;
+      if (!state.selectedPolygons.size || !state.graph) {
+        el.areaGroup.style.display = "none";
+        return;
+      }
+      const vb = getMapFrame();
+      if (!vb) { el.areaGroup.style.display = "none"; return; }
+
+      const selectedPolys = [];
+      state.selectedPolygons.forEach((id) => {
+        const poly = state.polygonsById.get(id);
+        if (poly) selectedPolys.push(poly);
+      });
+      if (!selectedPolys.length) { el.areaGroup.style.display = "none"; return; }
+
+      // 選択地物のリングをバウンディングボックスが重なるもの同士でまとめ、まとまりごとにCanvasで測る。
+      // 継ぎ目をまたぐ地物（西端と東端のピース）を1枚のCanvasで測ると地図全幅のボックスになり解像度が落ちるため。
+      // ボックスが重ならないまとまり同士は重ならないので、合計しても二重計上しない（包領などの重なりは同じまとまり内で和集合になる）。
+      const ringBoxes = [];
+      selectedPolys.forEach((poly) => {
+        getPolygonRings(poly).forEach((ring) => {
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+          ring.forEach((idx) => {
+            const p = state.graph.points[idx];
+            if (p.x < minX) minX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y > maxY) maxY = p.y;
+          });
+          ringBoxes.push({ ring, minX, minY, maxX, maxY });
+        });
+      });
+      const clusters = clusterBoxes(ringBoxes);
+      if (!clusters.length) { el.areaGroup.style.display = "none"; return; }
+      let totalArea = 0, landArea = 0;
+      clusters.forEach((cluster) => {
+        const measured = measureRingsArea(cluster, vb);
+        totalArea += measured.totalArea;
+        landArea += measured.landArea;
+      });
 
       el.areaDisplay.textContent =
         `総面積: ${formatArea(totalArea)}\n陸域面積: ${formatArea(landArea)}`;
@@ -1213,9 +1340,29 @@
       }
     }
 
+    // 球面出力で経度180度の人工的な切断線を海岸線として描かないか。false にすると従来どおり全部描く
+    // （この機能を外したいときはここだけ変えればよい。塗り・地物の結合には影響しない）。
+    const HIDE_SEAM_CUT_STROKES = true;
+
+    // 球面出力で線を描かない地図端の辺か: 全体が人工的な切断線（analyzeSeamのcut区間）に乗る辺。
+    // 地図端に沿う国境線と、反対側が海の本物の海岸線は描く。
+    function isArtificialSeamSegment(a, b) {
+      if (!HIDE_SEAM_CUT_STROKES || !state.seam) return false;
+      const frame = getMapFrame();
+      return DerleLogic.isArtificialSeamEdge(a, b, frame, getSeamTolerance(frame), state.seam);
+    }
+
+    // 海岸線の線分 a→b のうち球面出力で描く部分。切断区間と本物の海岸線にまたがる辺は区間の境界で切り、
+    // 人工的な部分だけを落とす（辺全体を中点で判定すると本物の海岸線まで消える）。
+    function seamCoastStrokeParts(a, b) {
+      if (!HIDE_SEAM_CUT_STROKES || !state.seam) return [[a, b]];
+      const frame = getMapFrame();
+      return DerleLogic.seamStrokeParts(a, b, frame, getSeamTolerance(frame), state.seam);
+    }
+
     function buildWikipediaCache() {
       if (!state.graph || !state.polygons.length) return false;
-      const vb = parseViewBox(state.viewBox);
+      const vb = getMapFrame();
       if (!vb) return false;
 
       const pointVectors = state.graph.points.map((pt) => mapPointToVector(pt, vb));
@@ -1224,13 +1371,14 @@
         let sx = 0;
         let sy = 0;
         let sz = 0;
-        poly.points.forEach((idx) => {
+        // 継ぎ目をまたぐ地物は全ピースの頂点を合算する（片方のピースだけに寄らないように）。
+        getPolygonRings(poly).forEach((ring) => ring.forEach((idx) => {
           const v = pointVectors[idx];
           if (!v) return;
           sx += v.x;
           sy += v.y;
           sz += v.z;
-        });
+        }));
         const len = Math.hypot(sx, sy, sz);
         const center = len ? { x: sx / len, y: sy / len, z: sz / len } : { x: 1, y: 0, z: 0 };
         polygonCenters.set(String(poly.id), center);
@@ -1254,13 +1402,16 @@
         return a < b ? mids : mids.slice().reverse();
       };
       const polygonRings = new Map();
+      // 地物 id → 球面へ写すリングの配列（継ぎ目をまたぐ地物は複数）。
       state.polygons.forEach((poly) => {
-        const ring = [];
-        poly.points.forEach((idx, i) => {
-          ring.push(idx);
-          sphereEdgeChain(idx, poly.points[(i + 1) % poly.points.length]).forEach((mid) => ring.push(mid));
-        });
-        polygonRings.set(String(poly.id), ring);
+        polygonRings.set(String(poly.id), getPolygonRings(poly).map((pts) => {
+          const ring = [];
+          pts.forEach((idx, i) => {
+            ring.push(idx);
+            sphereEdgeChain(idx, pts[(i + 1) % pts.length]).forEach((mid) => ring.push(mid));
+          });
+          return ring;
+        }));
       });
       const edgeChains = new Map();
       state.graph.edges.forEach((edge) => {
@@ -1271,10 +1422,13 @@
       if (state.rawCoastSegments && state.rawCoastSegments.length) {
         coastVectors = [];
         state.rawCoastSegments.forEach((seg) => {
-          const chain = [seg.a, ...densifyMapSegment(seg.a, seg.b, vb), seg.b].map((pt) => mapPointToVector(pt, vb));
-          for (let i = 1; i < chain.length; i += 1) {
-            if (chain[i - 1] && chain[i]) coastVectors.push({ a: chain[i - 1], b: chain[i] });
-          }
+          // 地図端上の人工的な切断線（陸が経度180度をまたいで続く所）は海岸線として描かない。
+          seamCoastStrokeParts(seg.a, seg.b).forEach(([pa, pb]) => {
+            const chain = [pa, ...densifyMapSegment(pa, pb, vb), pb].map((pt) => mapPointToVector(pt, vb));
+            for (let i = 1; i < chain.length; i += 1) {
+              if (chain[i - 1] && chain[i]) coastVectors.push({ a: chain[i - 1], b: chain[i] });
+            }
+          });
         });
       }
 
@@ -1810,10 +1964,12 @@
       const wikiSelection = resolveWikiSelection();
       const polygonRings = state.wikiOutput.polygonRings;
       state.polygons.forEach((poly) => {
-        const ring = polygonRings.get(String(poly.id)) || poly.points;
-        const clipped = clipPolygonToHemisphere(ring, rotX, rotY, rotZ, projX, projY, lonArr, latArr, back);
-        if (clipped.length < 3) return;
-        const d = buildPathFromPoints(clipped);
+        // 継ぎ目をまたぐ地物は全ピースを1つのパスにまとめる。
+        const rings = polygonRings.get(String(poly.id)) || getPolygonRings(poly);
+        const d = rings.map((ring) => {
+          const clipped = clipPolygonToHemisphere(ring, rotX, rotY, rotZ, projX, projY, lonArr, latArr, back);
+          return clipped.length < 3 ? "" : buildPathFromPoints(clipped);
+        }).filter(Boolean).join(" ");
         if (!d) return;
         allPolygonPaths.push(d);
         if (wikiSelection.has(String(poly.id))) {
@@ -1846,7 +2002,9 @@
         : state.graph
           ? buildEdgePath(
             state.graph.edges,
-            (edge) => edge.sources && edge.sources.has("coast"),
+            // 海岸線レイヤーの線分が無いときのフォールバック。辺単位なので、全体が切断線の辺だけを落とす。
+            (edge) => edge.sources && edge.sources.has("coast")
+              && !isArtificialSeamSegment(state.graph.points[edge.a], state.graph.points[edge.b]),
             rotX,
             rotY,
             rotZ,
@@ -2192,19 +2350,34 @@
       const edgeToPolys = new Map();
       polygons.forEach((poly) => {
         const polyId = String(poly.id);
-        const pts = poly.points;
-        for (let i = 0; i < pts.length; i += 1) {
-          const a = pts[i];
-          const b = pts[(i + 1) % pts.length];
-          const key = edgeKey(a, b);
-          if (!edgeToPolys.has(key)) {
-            edgeToPolys.set(key, { a, b, polys: new Set() });
+        getPolygonRings(poly).forEach((pts) => {
+          for (let i = 0; i < pts.length; i += 1) {
+            const a = pts[i];
+            const b = pts[(i + 1) % pts.length];
+            const key = edgeKey(a, b);
+            if (!edgeToPolys.has(key)) {
+              edgeToPolys.set(key, { a, b, polys: new Set() });
+            }
+            edgeToPolys.get(key).polys.add(polyId);
           }
-          edgeToPolys.get(key).polys.add(polyId);
-        }
+        });
       });
 
       return { edgeSources, edgeToPolys };
+    }
+
+    // 地図端上の人工的な切断線・枠の仮想辺か（国タイプ判定では境界として数えない）。
+    function isSeamCutEdge(aIdx, bIdx, sources) {
+      if (sources && sources.has("frame") && sources.size === 1) return true;
+      if (!state.seam || !state.graph) return false;
+      const frame = getMapFrame();
+      return DerleLogic.isArtificialSeamEdge(
+        state.graph.points[aIdx],
+        state.graph.points[bIdx],
+        frame,
+        getSeamTolerance(frame),
+        state.seam,
+      );
     }
 
     function classifyPolygons(polygons, graph, edgeSources, sharedSeaInfo, coastInfo) {
@@ -2219,15 +2392,20 @@
         let touchesSharedSea = false;
         let touchesCoast = false;
 
-        for (let i = 0; i < poly.points.length; i += 1) {
-          const aIdx = poly.points[i];
-          const bIdx = poly.points[(i + 1) % poly.points.length];
+        // 継ぎ目をまたぐ地物は全ピースの辺をまとめて1つの地物として判定する。
+        const edgesOfPoly = [];
+        getPolygonRings(poly).forEach((ring) => {
+          for (let i = 0; i < ring.length; i += 1) edgesOfPoly.push([ring[i], ring[(i + 1) % ring.length]]);
+        });
+        for (let i = 0; i < edgesOfPoly.length; i += 1) {
+          const [aIdx, bIdx] = edgesOfPoly[i];
           const edge = edgeKey(aIdx, bIdx);
           if (!touchesCoast && borderCoastPoints && (borderCoastPoints.has(aIdx) || borderCoastPoints.has(bIdx))) {
             touchesCoast = true;
           }
           const sources = edgeSources.get(edge);
           if (!sources) continue;
+          if (isSeamCutEdge(aIdx, bIdx, sources)) continue;
           if (sources.has("border")) hasBorder = true;
           if (sources.has("coast")) {
             hasCoast = true;
@@ -2367,7 +2545,12 @@
         const isLand = typeof Gimoza.makeLandTester === "function"
           ? Gimoza.makeLandTester(state.svgDoc)
           : undefined;
-        const assigned = Gimoza.assignLabelsToPolygons(labels, state.polygons, state.graph.points, { isLand });
+        // 面はピース単位で渡し（多数決は平面上の面で行う）、id には地物 id を入れる。
+        // 経度180度の継ぎ目でつないだ地物では、どちらのピースに載ったラベルも同じ地物に集まる。
+        const labelPolygons = state.polygonPieces.length
+          ? state.polygonPieces.map((piece) => ({ id: piece.featureId, points: piece.points, area: piece.area }))
+          : state.polygons;
+        const assigned = Gimoza.assignLabelsToPolygons(labels, labelPolygons, state.graph.points, { isLand });
         const out = new Map();
         // 国名とそれ以外を分ける。国レベルの面には州名・地名・海名・山岳名まで
         // 全部載る（デーレ共和国で 55 件）ので、そのまま並べると読めない。
@@ -2602,6 +2785,9 @@
       state.graph = null;
       state.polygons = [];
       state.polygonsById = new Map();
+      state.seam = null;
+      state.seamFeatures = [];
+      state.polygonPieces = [];
       state.polygonEdgeIndex = null;
       state.polygonTypes = new Map();
       state.polygonParents = new Map();
@@ -2617,6 +2803,7 @@
       state.svgDoc = doc;
       state.dashedClasses = collectDashedClasses(svg);
       state.viewBox = svg.getAttribute("viewBox") || `0 0 ${svg.getAttribute("width")} ${svg.getAttribute("height")}`;
+      state.mapFrame = resolveMapFrame(svg, state.viewBox);
 
       el.svgStack.innerHTML = "";
 
@@ -2641,7 +2828,11 @@
 
       buildLayerToggles();
       refreshLayerGroupControls();
-      setStatus("SVGを読み込みました。階層を選んでグラフを構築してください。");
+      const frame = state.mapFrame;
+      const frameMessage = frame
+        ? `地図枠(${frame.source === "sea" ? "_海の矩形" : "viewBox"}): x=${frame.x}..${frame.x + frame.width}, y=${frame.y}..${frame.y + frame.height}`
+        : "地図枠を決定できませんでした。";
+      setStatus(`SVGを読み込みました。階層を選んでグラフを構築してください。\n${frameMessage}`);
     }
 
     function buildLayerToggles() {
@@ -2797,6 +2988,9 @@
         state.graph = null;
         state.polygons = [];
         state.polygonsById = new Map();
+        state.seam = null;
+        state.seamFeatures = [];
+        state.polygonPieces = [];
         state.sharedSeaInfo = null;
         state.polygonEdgeIndex = null;
         state.polygonTypes.clear();
@@ -3004,19 +3198,81 @@
       try {
         await step("面を探索中...");
         const minArea = 0;
+        // 地図端（経度±180度）付近の頂点を端ちょうどに揃える（冪等）。継ぎ目の判定と球面上の隙間防止に使う。
+        const seamFrame = getMapFrame();
+        const seamTol = getSeamTolerance(seamFrame);
+        let seamSnapped = 0;
+        let frameEdgesAdded = 0;
+        if (seamFrame) {
+          seamSnapped = DerleLogic.snapPointsToSeam(state.graph.points, seamFrame, seamTol);
+          // 端で途切れた線（次数1の端点）は吸着許容値まで端に寄せる（海上国境が端の手前で止まっている場合も枠で閉じられるように）。
+          const degree = new Array(state.graph.points.length).fill(0);
+          state.graph.edges.forEach((edge) => {
+            degree[edge.a] += 1;
+            degree[edge.b] += 1;
+          });
+          const dangling = [];
+          degree.forEach((d, idx) => { if (d === 1) dangling.push(idx); });
+          const buildSnap = Number.isFinite(state.buildSnapTolerance) ? state.buildSnapTolerance : Number(el.snapTolerance.value);
+          seamSnapped += DerleLogic.snapPointsToSeam(state.graph.points, seamFrame, Math.max(seamTol, buildSnap || 0), dangling);
+          // 西端・東端に枠の仮想辺（sources: frame）を張り、端で切れた海の領域も面として閉じる。
+          frameEdgesAdded = DerleLogic.addSeamFrameEdges(state.graph, seamFrame, seamTol);
+        }
         const result = DerleLogic.extractPolygonsFromGraph(state.graph, minArea);
         if (result.polygons.length === 0 && result.outerFaces.length === 0) {
           throw new Error("多角形が見つかりません。間引き設定を調整するか海岸線を有効にしてください。");
         }
 
-        state.polygons = result.polygons.map((face, idx) => {
-          return {
-            id: idx + 1,
-            area: face.area,
-            points: face.points,
-            fill: randomFill(idx + 1),
-          };
+        // 枠の仮想辺と海岸線だけで閉じた海（端で陸が複数回接するときにできる）は実在の領域ではないので除く。
+        const graphEdgeSources = new Map();
+        state.graph.edges.forEach((edge) => graphEdgeSources.set(edgeKey(edge.a, edge.b), edge.sources));
+        const pieces = result.polygons.filter((face) => !DerleLogic.isFrameOnlySeaFace(
+          face.points,
+          (a, b) => graphEdgeSources.get(edgeKey(a, b)),
+        ));
+        const frameOnlyFaceCount = result.polygons.length - pieces.length;
+
+        // 経度180度の継ぎ目で切られたピースを同一地物にまとめる。
+        // 地物は rings（外周リングの配列）を持ち、id・種別・選択・面積・球面出力はすべて地物単位で扱う。
+        // 平面上の面として扱う必要がある処理（領有関係・ラベルの対応付け・.gimoza の書き出し）は
+        // state.polygonPieces（ピース単位、featureId 付き）で行い、結果を地物へ持ち上げる。
+        state.seam = seamFrame ? DerleLogic.analyzeSeam(state.graph, seamFrame, seamTol) : null;
+        const seamGrouping = state.seam
+          ? DerleLogic.groupSeamPolygons(pieces, state.graph.points, seamFrame, { tol: seamTol, cut: state.seam.cut })
+          : { groups: [], links: [], runs: [] };
+        const groupOf = new Map();
+        seamGrouping.groups.forEach((group) => group.forEach((pieceIdx) => groupOf.set(pieceIdx, group)));
+        const features = [];
+        const featureOfPiece = new Array(pieces.length).fill(-1);
+        state.seamFeatures = [];
+        pieces.forEach((face, pieceIdx) => {
+          const group = groupOf.get(pieceIdx);
+          if (group && group[0] !== pieceIdx) return;
+          const members = group || [pieceIdx];
+          const id = features.length + 1;
+          members.forEach((i) => { featureOfPiece[i] = features.length; });
+          features.push({
+            id,
+            area: members.reduce((sum, i) => sum + pieces[i].area, 0),
+            rings: members.map((i) => pieces[i].points),
+            fill: randomFill(id),
+          });
+          if (group) {
+            state.seamFeatures.push({
+              id,
+              pieces: members.map((i) => ({
+                west: seamGrouping.runs[i].west.map((iv) => iv.map((v) => Number(v.toFixed(1)))),
+                east: seamGrouping.runs[i].east.map((iv) => iv.map((v) => Number(v.toFixed(1)))),
+              })),
+            });
+          }
         });
+        state.polygons = features;
+        state.polygonPieces = pieces.map((face, i) => ({
+          featureId: String(features[featureOfPiece[i]].id),
+          area: face.area,
+          points: face.points,
+        }));
         state.polygonsById = new Map(state.polygons.map((poly) => [String(poly.id), poly]));
 
         clearOverlays();
@@ -3059,24 +3315,26 @@
         //   state.polygonOwners  … ポリゴン id → 領有する面の id（親の種別が領有する側のときだけ）
         await step("領有関係を解析中...");
         {
-          const typeList = state.polygons.map(
-            (p) => state.polygonTypes.get(String(p.id)) || "不明",
+          // 包含は平面上の面の関係なので、ピース単位で求めてから地物へ持ち上げる。
+          const piecesForOwnership = state.polygonPieces;
+          const typeList = piecesForOwnership.map(
+            (p) => state.polygonTypes.get(p.featureId) || "不明",
           );
           const ownership = DerleLogic.computeOwnership(
-            state.polygons,
+            piecesForOwnership,
             state.graph.points,
             typeList,
           );
           state.polygonParents = new Map();
           state.polygonOwners = new Map();
-          state.polygons.forEach((p, i) => {
+          piecesForOwnership.forEach((p, i) => {
             const parent = ownership.parents[i];
             const owner = ownership.owners[i];
-            if (parent !== -1) {
-              state.polygonParents.set(String(p.id), String(state.polygons[parent].id));
+            if (parent !== -1 && !state.polygonParents.has(p.featureId)) {
+              state.polygonParents.set(p.featureId, piecesForOwnership[parent].featureId);
             }
-            if (owner !== -1) {
-              state.polygonOwners.set(String(p.id), String(state.polygons[owner].id));
+            if (owner !== -1 && !state.polygonOwners.has(p.featureId)) {
+              state.polygonOwners.set(p.featureId, piecesForOwnership[owner].featureId);
             }
           });
         }
@@ -3101,11 +3359,27 @@
             ? `外側の面を除外しました: 面積 ${result.outerFaces[0].area.toFixed(2)}`
             : `外側の面を除外しました: ${outerCount}面`;
 
+        const seamLines = state.seamFeatures.map((info) => {
+          const type = state.polygonTypes.get(String(info.id)) || "不明";
+          const ranges = info.pieces.map((piece) => {
+            const parts = [];
+            if (piece.west.length) parts.push(`西端y ${piece.west.map((iv) => iv.join("–")).join(", ")}`);
+            if (piece.east.length) parts.push(`東端y ${piece.east.map((iv) => iv.join("–")).join(", ")}`);
+            return parts.join(" / ");
+          }).join(" ＋ ");
+          return `  #${info.id}（${type}・${info.pieces.length}ピース）: ${ranges}`;
+        });
+        const seamBorderCount = state.seam ? state.seam.borderAny.length : 0;
+        console.info("[継ぎ目] 経度180度でつないだ地物", state.seamFeatures, "端の国境線区間", state.seam && state.seam.borderAny);
         setStatus([
-          `多角形を抽出しました: ${state.polygons.length}`,
+          `多角形を抽出しました: ${state.polygons.length}（ピース ${pieces.length}）`,
           outerMessage,
           `領有関係: ${ownedCount}面が他の領域に領有されています`,
-        ].join("\n"));
+          `地図端に揃えた頂点: ${seamSnapped} / 枠の仮想辺: ${frameEdgesAdded}本 / 除外した枠だけの海: ${frameOnlyFaceCount}面`,
+          `経度180度でつないだ地物: ${state.seamFeatures.length}件（端に沿う国境線の区間: ${seamBorderCount}）`,
+          ...seamLines,
+          state.seamFeatures.length ? "※日付変更線上に国境がある場合は_国境界レイヤーで地図端に線を引いてください。" : "",
+        ].filter(Boolean).join("\n"));
       } catch (error) {
         // 途中で落ちた state（種別が空・領有が前回のまま等）を「成功」として
         // 書き出し側へ渡さないよう、呼び出し元へ投げ直す。
@@ -3146,6 +3420,9 @@
         if (edge.sources.has("coast")) {
           line.setAttribute("stroke", "#6abf69");
           line.setAttribute("stroke-width", "0.4");
+        } else if (edge.sources.has("frame")) {
+          line.setAttribute("stroke", "#7aa2f7");
+          line.setAttribute("stroke-dasharray", "2 2");
         }
         group.appendChild(line);
       });
@@ -3165,10 +3442,11 @@
 
       state.polygons.forEach((poly) => {
         const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        const d = poly.points.map((idx, i) => {
+        // 継ぎ目をまたぐ地物は全ピースを1つのpathにまとめる（どのピースをクリックしても同じ地物）。
+        const d = getPolygonRings(poly).map((ring) => ring.map((idx, i) => {
           const p = state.graph.points[idx];
           return `${i === 0 ? "M" : "L"}${p.x} ${p.y}`;
-        }).join(" ") + " Z";
+        }).join(" ") + " Z").join(" ");
         path.setAttribute("d", d);
         path.setAttribute("fill", getPolygonDisplayFill(poly));
         path.setAttribute("fill-opacity", opacity);
@@ -3318,12 +3596,30 @@
           b: edge.b,
           sources: Array.from(edge.sources),
         })),
-        polygons: state.polygons.map((poly) => ({
-          id: poly.id,
-          area: poly.area,
-          points: poly.points.slice(),
-        })),
-        types: new Map(state.polygonTypes),
+        // .gimoza は平面上の「領域リング＋穴」で地物を表し、包含解析・間引き・整合性検査も地図平面で行うので、
+        // 経度180度の継ぎ目でつないだ地物はピースごとに渡す。id は地物 id を保ち（先頭のピース）、
+        // 2つ目以降のピースには地物数より後ろの id を振る。seamGroups で同じ地物のピースを伝え、名前を揃える。
+        ...(() => {
+          const out = [];
+          const types = new Map();
+          const seamGroups = new Map();
+          let nextId = state.polygons.length;
+          const used = new Set();
+          state.polygonPieces.forEach((piece) => {
+            const fid = Number(piece.featureId);
+            const id = used.has(fid) ? (nextId += 1) : fid;
+            used.add(fid);
+            out.push({ id, area: piece.area, points: piece.points.slice() });
+            types.set(String(id), state.polygonTypes.get(piece.featureId) || "不明");
+            if (!seamGroups.has(fid)) seamGroups.set(fid, []);
+            seamGroups.get(fid).push(id);
+          });
+          return {
+            polygons: out,
+            types,
+            seamGroups: [...seamGroups.values()].filter((ids) => ids.length > 1),
+          };
+        })(),
         parents: new Map(state.polygonParents),
         owners: new Map(state.polygonOwners),
       };
@@ -3378,6 +3674,7 @@
           edges: basePass.edges,
           polygons: basePass.polygons,
           types: basePass.types,
+          seamGroups: basePass.seamGroups,
           svgDoc: state.svgDoc,
           countryPolygons: countryPass,
           // 間引き版は「組み立て → 整合性チェック → 落ちた面の間引きを解除 → 組み直し」を
