@@ -452,6 +452,8 @@
       polygonsById: new Map(),
       wikiOutput: {
         pointVectors: null,
+        polygonRings: new Map(),
+        edgeChains: new Map(),
         polygonCenters: new Map(),
         coastVectors: null,
         landVectorPaths: [],
@@ -859,6 +861,37 @@
       };
     }
 
+    // 球面へ写す辺の長さの上限（経度・緯度の度）。地図上の直線は経緯度の直線なので、長い辺を
+    // 弦のまま球面へ写すと地図とずれる。地平線弧の回転角と真裏の点の内外判定（経緯度平面）が
+    // 食い違うと塗りが反転するため、球面へ写す前にこの長さ以下へ刻む。
+    const SPHERE_EDGE_MAX_DEG = 1;
+
+    // 地図座標の辺a→bを経緯度で SPHERE_EDGE_MAX_DEG 以下に刻む中間点（両端は含まない）。
+    function densifyMapSegment(a, b, vb) {
+      const spanDeg = Math.max(
+        (Math.abs(b.x - a.x) / vb.width) * 360,
+        (Math.abs(b.y - a.y) / vb.height) * 180,
+      );
+      const pieces = Math.ceil(spanDeg / SPHERE_EDGE_MAX_DEG);
+      const out = [];
+      for (let k = 1; k < pieces; k += 1) {
+        const t = k / pieces;
+        out.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+      }
+      return out;
+    }
+
+    // 閉じた点列の各辺（最後→最初を含む）を densifyMapSegment で刻む。
+    function densifyMapRing(points, vb) {
+      const out = [];
+      for (let i = 0; i < points.length; i += 1) {
+        const a = points[i];
+        out.push(a);
+        densifyMapSegment(a, points[(i + 1) % points.length], vb).forEach((p) => out.push(p));
+      }
+      return out;
+    }
+
     function applyTransform(point, element) {
       if (!el.measureSvg) return { x: point.x, y: point.y };
       const ctm = element.getCTM();
@@ -971,7 +1004,7 @@
               points = cleanPathPoints(samplePathElement(item, LAND_RETRY_STEP, subpath));
             }
             if (points.length < 3) return;
-            const vectors = points.map((pt) => mapPointToVector(pt, vb)).filter(Boolean);
+            const vectors = densifyMapRing(points, vb).map((pt) => mapPointToVector(pt, vb)).filter(Boolean);
             if (vectors.length >= 3) {
               vectorPaths.push(vectors);
             }
@@ -982,7 +1015,7 @@
           points = points.concat(points[0]);
           points = cleanPathPoints(points);
           if (points.length < 3) return;
-          const vectors = points.map((pt) => mapPointToVector(pt, vb)).filter(Boolean);
+          const vectors = densifyMapRing(points, vb).map((pt) => mapPointToVector(pt, vb)).filter(Boolean);
           if (vectors.length >= 3) {
             vectorPaths.push(vectors);
           }
@@ -992,7 +1025,7 @@
           points = points.concat(points[0]);
           points = cleanPathPoints(points);
           if (points.length < 3) return;
-          const vectors = points.map((pt) => mapPointToVector(pt, vb)).filter(Boolean);
+          const vectors = densifyMapRing(points, vb).map((pt) => mapPointToVector(pt, vb)).filter(Boolean);
           if (vectors.length >= 3) {
             vectorPaths.push(vectors);
           }
@@ -1155,6 +1188,8 @@
         cancelAnimationFrame(state.wikiOutput.animId);
       }
       state.wikiOutput.pointVectors = null;
+      state.wikiOutput.polygonRings = new Map();
+      state.wikiOutput.edgeChains = new Map();
       state.wikiOutput.polygonCenters = new Map();
       state.wikiOutput.coastVectors = null;
       state.wikiOutput.landVectorPaths = [];
@@ -1189,14 +1224,51 @@
         polygonCenters.set(String(poly.id), center);
       });
 
+      // 長い辺の中間点を pointVectors の後ろに足し、多角形と辺はそれを通る点列で球面へ写す
+      // （SPHERE_EDGE_MAX_DEG）。中間点は辺ごとに一度だけ作り、隣り合う多角形と境界線で共有する。
+      const edgeMidpoints = new Map();
+      const sphereEdgeChain = (a, b) => {
+        const lo = Math.min(a, b);
+        const hi = Math.max(a, b);
+        const key = `${lo},${hi}`;
+        let mids = edgeMidpoints.get(key);
+        if (!mids) {
+          mids = densifyMapSegment(state.graph.points[lo], state.graph.points[hi], vb).map((pt) => {
+            pointVectors.push(mapPointToVector(pt, vb));
+            return pointVectors.length - 1;
+          });
+          edgeMidpoints.set(key, mids);
+        }
+        return a < b ? mids : mids.slice().reverse();
+      };
+      const polygonRings = new Map();
+      state.polygons.forEach((poly) => {
+        const ring = [];
+        poly.points.forEach((idx, i) => {
+          ring.push(idx);
+          sphereEdgeChain(idx, poly.points[(i + 1) % poly.points.length]).forEach((mid) => ring.push(mid));
+        });
+        polygonRings.set(String(poly.id), ring);
+      });
+      const edgeChains = new Map();
+      state.graph.edges.forEach((edge) => {
+        edgeChains.set(edge, [edge.a, ...sphereEdgeChain(edge.a, edge.b), edge.b]);
+      });
+
       let coastVectors = null;
       if (state.rawCoastSegments && state.rawCoastSegments.length) {
-        coastVectors = state.rawCoastSegments
-          .map((seg) => ({ a: mapPointToVector(seg.a, vb), b: mapPointToVector(seg.b, vb) }))
-          .filter((seg) => seg.a && seg.b);
+        coastVectors = [];
+        state.rawCoastSegments.forEach((seg) => {
+          const chain = [seg.a, ...densifyMapSegment(seg.a, seg.b, vb), seg.b].map((pt) => mapPointToVector(pt, vb));
+          for (let i = 1; i < chain.length; i += 1) {
+            if (chain[i - 1] && chain[i]) coastVectors.push({ a: chain[i - 1], b: chain[i] });
+          }
+        });
       }
 
       state.wikiOutput.pointVectors = pointVectors;
+      state.wikiOutput.polygonRings = polygonRings;
+      state.wikiOutput.edgeChains = edgeChains;
       state.wikiOutput.polygonCenters = polygonCenters;
       state.wikiOutput.coastVectors = coastVectors;
       state.wikiOutput.landVectorPaths = collectLandVectorPaths(getLandSampleStep());
@@ -1541,23 +1613,28 @@
 
     function buildEdgePath(edges, predicate, rotX, rotY, rotZ, projX, projY) {
       const parts = [];
+      const edgeChains = state.wikiOutput.edgeChains;
       edges.forEach((edge) => {
         if (!predicate(edge)) return;
-        const a = edge.a;
-        const b = edge.b;
-        const zA = rotZ[a];
-        const zB = rotZ[b];
-        if (zA >= 0 && zB >= 0) {
-          parts.push(`M${formatCoord(projX[a])} ${formatCoord(projY[a])} L${formatCoord(projX[b])} ${formatCoord(projY[b])}`);
-          return;
-        }
-        if (zA >= 0 || zB >= 0) {
-          const hit = intersectRotatedIndices(a, b, rotX, rotY, rotZ);
-          if (!hit) return;
-          if (zA >= 0) {
-            parts.push(`M${formatCoord(projX[a])} ${formatCoord(projY[a])} L${formatCoord(hit.x)} ${formatCoord(hit.y)}`);
-          } else {
-            parts.push(`M${formatCoord(hit.x)} ${formatCoord(hit.y)} L${formatCoord(projX[b])} ${formatCoord(projY[b])}`);
+        // 長い辺は buildWikipediaCache で刻んだ中間点を通す（塗りの輪郭と線を一致させる）。
+        const chain = edgeChains.get(edge) || [edge.a, edge.b];
+        for (let i = 1; i < chain.length; i += 1) {
+          const a = chain[i - 1];
+          const b = chain[i];
+          const zA = rotZ[a];
+          const zB = rotZ[b];
+          if (zA >= 0 && zB >= 0) {
+            parts.push(`M${formatCoord(projX[a])} ${formatCoord(projY[a])} L${formatCoord(projX[b])} ${formatCoord(projY[b])}`);
+            continue;
+          }
+          if (zA >= 0 || zB >= 0) {
+            const hit = intersectRotatedIndices(a, b, rotX, rotY, rotZ);
+            if (!hit) continue;
+            if (zA >= 0) {
+              parts.push(`M${formatCoord(projX[a])} ${formatCoord(projY[a])} L${formatCoord(hit.x)} ${formatCoord(hit.y)}`);
+            } else {
+              parts.push(`M${formatCoord(hit.x)} ${formatCoord(hit.y)} L${formatCoord(projX[b])} ${formatCoord(projY[b])}`);
+            }
           }
         }
       });
@@ -1719,8 +1796,10 @@
       const allPolygonPaths = [];
       const selectedPolygonPaths = [];
       const wikiSelection = resolveWikiSelection();
+      const polygonRings = state.wikiOutput.polygonRings;
       state.polygons.forEach((poly) => {
-        const clipped = clipPolygonToHemisphere(poly.points, rotX, rotY, rotZ, projX, projY, lonArr, latArr, back);
+        const ring = polygonRings.get(String(poly.id)) || poly.points;
+        const clipped = clipPolygonToHemisphere(ring, rotX, rotY, rotZ, projX, projY, lonArr, latArr, back);
         if (clipped.length < 3) return;
         const d = buildPathFromPoints(clipped);
         if (!d) return;
