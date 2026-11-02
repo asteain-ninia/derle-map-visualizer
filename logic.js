@@ -1699,11 +1699,33 @@
     return { border, coast, borderAny, landBoth, realCoast, cut };
   }
 
-  // 辺(a, b)が地図端上の人工的な切断線か（seamはanalyzeSeamの結果）。
+  // 地図端の辺 a→b のうち、人工的な切断区間（seam.cut）に乗らない部分を [[p, q], ...] で返す（向きは a→b のまま）。
+  // 1 本の辺が切断区間と本物の海岸線（realCoast）や国境の区間にまたがることがあるので（polygon/polyline の長い辺は
+  // 反対側の端点の位置で分割されない）、辺全体を中点で判定せず、区間の境界で切って人工的な部分だけを落とす。
+  // 地図端に乗らない辺はそのまま返す。tol 以下の切れ端は捨てる。
+  function seamStrokeParts(a, b, frame, tol, seam) {
+    if (!seam || !seamEdgeSide(a, b, frame, tol)) return [[a, b]];
+    const y0 = Math.min(a.y, b.y);
+    const y1 = Math.max(a.y, b.y);
+    if (y1 - y0 <= EPS) return [[a, b]];
+    const keep = subtractIntervals([[y0, y1]], seam.cut).filter((iv) => iv[1] - iv[0] > tol);
+    const at = (y) => {
+      if (y === a.y) return a;
+      if (y === b.y) return b;
+      const t = (y - a.y) / (b.y - a.y);
+      return { x: a.x + (b.x - a.x) * t, y };
+    };
+    const parts = keep.map(([lo, hi]) => (a.y <= b.y ? [at(lo), at(hi)] : [at(hi), at(lo)]));
+    if (a.y > b.y) parts.reverse();
+    return parts;
+  }
+
+  // 辺(a, b)が全体として地図端上の人工的な切断線か（seamはanalyzeSeamの結果）。
+  // 一部でも本物の海岸線・国境の区間を含む辺は false（国タイプ判定で境界として数える）。描画は seamStrokeParts で切り分ける。
   function isArtificialSeamEdge(a, b, frame, tol, seam) {
     if (!seam) return false;
     if (!seamEdgeSide(a, b, frame, tol)) return false;
-    return intervalsContain(seam.cut, (a.y + b.y) / 2);
+    return seamStrokeParts(a, b, frame, tol, seam).length === 0;
   }
 
   // 枠の仮想辺だけで海側を閉じた面（国境線を含まない）か。地図端で陸が複数回接するときにできる
@@ -1830,6 +1852,7 @@
     addSeamFrameEdges,
     analyzeSeam,
     isArtificialSeamEdge,
+    seamStrokeParts,
     isFrameOnlySeaFace,
     collectSeamRuns,
     groupSeamPolygons,

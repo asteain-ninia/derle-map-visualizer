@@ -546,6 +546,28 @@
           !L.isArtificialSeamEdge(P(0, 150), P(0, 151), frame, tol, seam) && !groupOfPiece(realCoast)],
         ["区間演算: 差・積", JSON.stringify(L.subtractIntervals([[0, 10]], [[2, 3], [5, 6]])) === "[[0,2],[3,5],[6,10]]"
           && JSON.stringify(L.intersectIntervals([[0, 4], [6, 10]], [[3, 7]])) === "[[3,4],[6,7]]"],
+        ["切断区間と本物の海岸線にまたがる1本の辺は、本物の海岸線の部分だけ描く（西端 y20–80・東端 y20–70 → 西端 y70–80 が残る）", (() => {
+          const f = { x: 0, y: 0, width: 400, height: 200 };
+          const g = {
+            points: [P(0, 20), P(0, 80), P(400, 20), P(400, 70)],
+            edges: [
+              { a: 0, b: 1, sources: new Set(["coast"]) },
+              { a: 2, b: 3, sources: new Set(["coast"]) },
+            ],
+          };
+          const s2 = L.analyzeSeam(g, f, tol);
+          // 修正前の描画判定（辺全体を中点で判定し、人工的なら丸ごと落とす）は seamStrokeParts が無い版で再現する
+          const strokeParts = L.seamStrokeParts
+            || ((a, b, fr, t, sm) => (L.isArtificialSeamEdge(a, b, fr, t, sm) ? [] : [[a, b]]));
+          const west = strokeParts(g.points[0], g.points[1], f, tol, s2);
+          const westRev = strokeParts(g.points[1], g.points[0], f, tol, s2);
+          const east = strokeParts(g.points[2], g.points[3], f, tol, s2);
+          const near1 = (a, b) => Math.abs(a - b) < 1e-9;
+          return west.length === 1 && near1(west[0][0].y, 70) && near1(west[0][1].y, 80) && west[0][0].x === 0
+            && westRev.length === 1 && near1(westRev[0][0].y, 80) && near1(westRev[0][1].y, 70)
+            && east.length === 0
+            && !L.isArtificialSeamEdge(g.points[0], g.points[1], f, tol, s2);
+        })()],
         ["重なりが短い方の50%未満の区間はつながない（海上国境が両端で少しずれる場合）", (() => {
           const pts = [P(0, 100), P(0, 300), P(0, 500), P(400, 100), P(400, 310), P(400, 500)];
           const polys = [{ points: [0, 1] }, { points: [1, 2] }, { points: [3, 4] }, { points: [4, 5] }];

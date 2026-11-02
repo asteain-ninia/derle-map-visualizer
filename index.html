@@ -1340,12 +1340,24 @@
       }
     }
 
-    // 球面出力で線を描かない地図端の辺か: 人工的な切断線（analyzeSeamのcut区間）。
+    // 球面出力で経度180度の人工的な切断線を海岸線として描かないか。false にすると従来どおり全部描く
+    // （この機能を外したいときはここだけ変えればよい。塗り・地物の結合には影響しない）。
+    const HIDE_SEAM_CUT_STROKES = true;
+
+    // 球面出力で線を描かない地図端の辺か: 全体が人工的な切断線（analyzeSeamのcut区間）に乗る辺。
     // 地図端に沿う国境線と、反対側が海の本物の海岸線は描く。
     function isArtificialSeamSegment(a, b) {
-      if (!state.seam) return false;
+      if (!HIDE_SEAM_CUT_STROKES || !state.seam) return false;
       const frame = getMapFrame();
       return DerleLogic.isArtificialSeamEdge(a, b, frame, getSeamTolerance(frame), state.seam);
+    }
+
+    // 海岸線の線分 a→b のうち球面出力で描く部分。切断区間と本物の海岸線にまたがる辺は区間の境界で切り、
+    // 人工的な部分だけを落とす（辺全体を中点で判定すると本物の海岸線まで消える）。
+    function seamCoastStrokeParts(a, b) {
+      if (!HIDE_SEAM_CUT_STROKES || !state.seam) return [[a, b]];
+      const frame = getMapFrame();
+      return DerleLogic.seamStrokeParts(a, b, frame, getSeamTolerance(frame), state.seam);
     }
 
     function buildWikipediaCache() {
@@ -1411,11 +1423,12 @@
         coastVectors = [];
         state.rawCoastSegments.forEach((seg) => {
           // 地図端上の人工的な切断線（陸が経度180度をまたいで続く所）は海岸線として描かない。
-          if (isArtificialSeamSegment(seg.a, seg.b)) return;
-          const chain = [seg.a, ...densifyMapSegment(seg.a, seg.b, vb), seg.b].map((pt) => mapPointToVector(pt, vb));
-          for (let i = 1; i < chain.length; i += 1) {
-            if (chain[i - 1] && chain[i]) coastVectors.push({ a: chain[i - 1], b: chain[i] });
-          }
+          seamCoastStrokeParts(seg.a, seg.b).forEach(([pa, pb]) => {
+            const chain = [pa, ...densifyMapSegment(pa, pb, vb), pb].map((pt) => mapPointToVector(pt, vb));
+            for (let i = 1; i < chain.length; i += 1) {
+              if (chain[i - 1] && chain[i]) coastVectors.push({ a: chain[i - 1], b: chain[i] });
+            }
+          });
         });
       }
 
@@ -1989,6 +2002,7 @@
         : state.graph
           ? buildEdgePath(
             state.graph.edges,
+            // 海岸線レイヤーの線分が無いときのフォールバック。辺単位なので、全体が切断線の辺だけを落とす。
             (edge) => edge.sources && edge.sources.has("coast")
               && !isArtificialSeamSegment(state.graph.points[edge.a], state.graph.points[edge.b]),
             rotX,
