@@ -963,60 +963,18 @@
       return out;
     }
 
-    function applyTransform(point, element) {
-      if (!el.measureSvg) return { x: point.x, y: point.y };
-      const ctm = element.getCTM();
-      if (!ctm) return { x: point.x, y: point.y };
-      const svgPoint = el.measureSvg.createSVGPoint();
-      svgPoint.x = point.x;
-      svgPoint.y = point.y;
-      const out = svgPoint.matrixTransform(ctm);
-      return { x: out.x, y: out.y };
-    }
-
-    // パスの点列化と `d` のサブパス分割は logic.js のものを使う。ここに写しを置くと
+    // 要素の点列化・座標変換・`d` のサブパス分割は logic.js のものを使う。ここに写しを置くと
     // 片方だけ直したときに食い違う（実際 splitPathData でそれが起きた）。とくに点列化は
     // getPointAtLength を使う旧方式のままだったため、Wikipedia風出力の陸地取得だけが
     // 81 秒かかっていた（logic.js 側は `d` を直接読む方式に置き換わっている）。
+    // applyTransform / samplePolylineElement / sampleRectElement / distanceSq も同じ理由で
+    // DerleLogic へ一本化した（現状.md 重要度最低 2）。
     const splitPathData = (d) => DerleLogic.splitPathData(d);
     const samplePathElement = (pathEl, step, pathDataOverride) =>
       DerleLogic.samplePathElement(pathEl, step, pathDataOverride);
-
-    function samplePolylineElement(polyEl) {
-      if (!el.measureSvg) return [];
-      const clone = polyEl.cloneNode(true);
-      el.measureSvg.appendChild(clone);
-      const points = [];
-      const raw = clone.getAttribute("points") || "";
-      const parts = raw.trim().split(/[\s,]+/).filter(Boolean);
-      for (let i = 0; i < parts.length; i += 2) {
-        const x = Number(parts[i]);
-        const y = Number(parts[i + 1]);
-        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-        points.push(applyTransform({ x, y }, clone));
-      }
-      el.measureSvg.removeChild(clone);
-      return points;
-    }
-
-    function sampleRectElement(rectEl) {
-      if (!el.measureSvg) return [];
-      const clone = rectEl.cloneNode(true);
-      el.measureSvg.appendChild(clone);
-      const x = Number(clone.getAttribute("x")) || 0;
-      const y = Number(clone.getAttribute("y")) || 0;
-      const w = Number(clone.getAttribute("width")) || 0;
-      const h = Number(clone.getAttribute("height")) || 0;
-      const rawPoints = [
-        { x, y },
-        { x: x + w, y },
-        { x: x + w, y: y + h },
-        { x, y: y + h },
-      ];
-      const points = rawPoints.map((pt) => applyTransform(pt, clone));
-      el.measureSvg.removeChild(clone);
-      return points;
-    }
+    const samplePolylineElement = (polyEl) => DerleLogic.samplePolylineElement(polyEl);
+    const sampleRectElement = (rectEl) => DerleLogic.sampleRectElement(rectEl);
+    const distanceSq = (a, b) => DerleLogic.distanceSq(a, b);
 
     function cleanPathPoints(points) {
       if (!points.length) return [];
@@ -2191,12 +2149,6 @@
 
     function edgeKey(a, b) {
       return a < b ? `${a}-${b}` : `${b}-${a}`;
-    }
-
-    function distanceSq(a, b) {
-      const dx = a.x - b.x;
-      const dy = a.y - b.y;
-      return dx * dx + dy * dy;
     }
 
     function buildPointLookup(points, snap) {

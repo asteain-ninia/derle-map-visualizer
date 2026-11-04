@@ -249,3 +249,21 @@
 - 対応: 地図端の海岸線を`analyzeSeam`の`cut`区間の境界で切り（`DerleLogic.seamStrokeParts`）、人工的な部分だけを描画から除く（`buildWikipediaCache`の`coastVectors`）。地図端に沿う国境線と、反対側が海の本物の海岸線は描く。塗りは変更しない（地物の塗りは継ぎ目の結合で既に1つのpathになっている）。グラフ辺から描くフォールバックは辺単位なので、全体が切断区間に乗る辺だけを落とす。
 - 外したいときは index.html の`HIDE_SEAM_CUT_STROKES`を`false`にする（main の取り込みでマージコミットに入ったため、1コミットの revert では外せなくなった）。
 - 罠（外部レビュー Codex の指摘）: 最初は辺全体を中点で判定していたため、1本の辺が切断区間と本物の海岸線にまたがると本物の海岸線まで消えていた（例: 高さ200の枠で西端の海岸線 y=20–80、東端 y=20–70 → 西端 y=70–80 は本物の海岸線なのに辺ごと消える）。`polygon`/`polyline`や`d`の直線コマンドの長い辺は、反対側の端点の位置では分割されないので実際に起こる。**区間で分類したものを辺単位で使うときは、区間の境界で辺を切る。** 国タイプ判定の`isArtificialSeamEdge`も「全体が切断区間に乗る辺」だけを真にした（一部でも本物の境界を含む辺は境界として数える）。
+
+### テスト（`node --test`）と、置き換えの前後比較
+
+- 実行: `npm test`（中身は `node --test`。依存なし、Node 22 で確認）。テストは `test/*.test.js`。
+- logic.js / gimoza.js はブラウザの `<script>` 用のまま、末尾で `module.exports` があるときだけ公開する（`})(typeof window !== "undefined" ? window : globalThis);`）。**package.json は `"type": "commonjs"`** にしてある。`"module"` にすると .js が ESM 扱いになり、この 2 ファイルを `require` できなくなる。
+- gimoza.js は幾何の部品を `DerleLogic` に頼るので、テストでは **logic.js を先に `require`** する。
+- `nextFrame` は `requestAnimationFrame` が無い環境では `setTimeout(0)` で待つ（Node で `onProgress` 付きの非同期関数を呼んでも止まらない）。ブラウザでの挙動は同じ。
+- テストできないもの: `getCTM` で座標変換する点列化（`samplePathElement` など）は DOM が要るので `logic_test.html`（ブラウザで開く）側。球面投影・国タイプ判定は index.html の中にあるので未テスト（現状.md 設計 4）。
+- **index.html を触る変更の前後比較は Playwright で行う**（chromium は入っている）。`python3 -m http.server` で配信し、ページ内で `fetch` した原図を `loadSvgText()` に渡してから `await buildGraph()` → `await extractPolygons()` → `scheduleWikipediaUpdate(true)` → `exportGimoza()` を順に呼ぶ。`state` や関数はインラインスクリプトの大域なので `page.evaluate` からそのまま触れる。点・辺・面の数に加えて、**点座標・面のリング・陸地パス・球面 SVG・`.gimoza` のバイト列のハッシュ**を比べる（`.gimoza` は同じ入力なら毎回バイト一致する＝決定的なので、ハッシュ比較が使える）。
+  - `page.setInputFiles("#fileInput", …)` では読み込みが始まらなかった（原因は追っていない）。`fetch` → `loadSvgText` なら確実。
+  - BUR080809・既定設定の基準値（2026-11-04 時点）: 点 45,331 / 辺 45,764 / 線分 49,351 / 橋渡し 71 / 地物 688（ピース 689）/ 陸地パス 549 / `.gimoza` 1,314,850 バイト（間引き版・目標 16,500 頂点、面 772）。
+
+### 重複定義の一本化（index.html / gimoza.js → logic.js）
+
+- index.html の `applyTransform` / `samplePolylineElement` / `sampleRectElement` / `distanceSq` と、gimoza.js の `ringSignedArea` / `pointInRing` / `bboxOfRing` を消し、`DerleLogic` のもの（`sampleRectElement` と `distanceSq` は logic.js へ移設）へ通した。
+- 消す前に写しと突き合わせた結果、**計算はどれも同一**だった。違いは index.html 版の `samplePolylineElement` / `sampleRectElement` が `measureSvg` 未設定時に `[]` を返す（logic.js 版は例外）点だけで、index.html は起動時に `DerleLogic.setMeasureSvg(el.measureSvg)` を済ませているので到達しない。前後で点座標・面・陸地パス・球面 SVG・`.gimoza` のバイト列まで完全一致を確認した。
+- 一本化していないもの: index.html の `pointInPolygon(point, indices, points, tol)` は「境界から `tol` 以内なら内側」とする**別の判定**（クリック選択用）で、logic.js の `pointInRingIndices` の写しではない。gimoza.js の `locateInRing` も経緯度・許容値付きの別物（「整合性判定は『頂点は外積きっちり 0』という前提で書かれている」の項）。名前が似ていても意味が違うものは無理に寄せない。
+- **教訓（再掲）: 部品を足すときは logic.js に置き、index.html / gimoza.js からは `DerleLogic` 経由で呼ぶ。** 写しを置くと片方だけ直して食い違う（`splitPathData`、`samplePathElement` で 2 度実害が出た）。
