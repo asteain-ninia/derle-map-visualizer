@@ -1,0 +1,9 @@
+{
+  "name": "derle-map-visualizer",
+  "private": true,
+  "description": "デーレ界の出界図（SVG）から国境・海岸線のグラフを作り、領域を抽出するブラウザアプリ。依存なし。",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test"
+  }
+}

@@ -224,14 +224,20 @@
     return new Set(out).size >= 3 ? out : null;
   }
 
+  /**
+   * logic.js（DerleLogic）を返す。面積・内外判定・外接矩形のような幾何の部品は logic.js に
+   * 一本化してあり、ここに写しを置かない（写しが食い違って不具合になった前例がある。
+   * AGENT.md「重複定義の取り残しで〜」）。
+   */
+  function logic() {
+    const l = global.DerleLogic;
+    if (!l) throw new Error("gimoza.js は logic.js (DerleLogic) を必要とします");
+    return l;
+  }
+
+  // 符号付き面積（y 下向きの SVG 座標で、時計回りが正）
   function ringSignedArea(indices, points) {
-    let a = 0;
-    for (let i = 0; i < indices.length; i += 1) {
-      const p = points[indices[i]];
-      const q = points[indices[(i + 1) % indices.length]];
-      a += p.x * q.y - q.x * p.y;
-    }
-    return a / 2;
+    return logic().polygonArea(indices, points);
   }
 
   /**
@@ -426,30 +432,11 @@
   }
 
   function bboxOfRing(ring, points) {
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const i of ring) {
-      const q = points[i];
-      if (q.x < minX) minX = q.x;
-      if (q.y < minY) minY = q.y;
-      if (q.x > maxX) maxX = q.x;
-      if (q.y > maxY) maxY = q.y;
-    }
-    return { minX, minY, maxX, maxY };
+    return logic().ringBounds(ring, points);
   }
 
   function pointInRing(x, y, ring, points) {
-    let inside = false;
-    for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
-      const a = points[ring[i]];
-      const b = points[ring[j]];
-      if (a.y > y !== b.y > y && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) {
-        inside = !inside;
-      }
-    }
-    return inside;
+    return logic().pointInRingIndices(x, y, ring, points);
   }
 
   /**
@@ -457,11 +444,7 @@
    * 判定そのものは logic.js の computeContainment に任せる (同じ判定を二重に書かない)。
    */
   function computeParents(polys, points) {
-    const logic = global.DerleLogic;
-    if (!logic || typeof logic.computeContainment !== "function") {
-      throw new Error("gimoza.js は logic.js (DerleLogic.computeContainment) を必要とします");
-    }
-    return logic.computeContainment(
+    return logic().computeContainment(
       polys.map((p) => ({ points: p.ring, area: p.absArea })),
       points,
     );
@@ -2579,4 +2562,9 @@
     locateInRing,
     ringsProperlyCross,
   };
-})(window);
+
+  // Node（`node --test`）から require できるようにする。logic.js を先に require しておくこと。
+  if (typeof module === "object" && module && module.exports) {
+    module.exports = global.Gimoza;
+  }
+})(typeof window !== "undefined" ? window : globalThis);

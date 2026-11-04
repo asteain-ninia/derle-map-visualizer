@@ -9,6 +9,11 @@
   }
 
   function nextFrame() {
+    // Node（node --test）には requestAnimationFrame が無い。描画の機会を作るための待ちなので、
+    // 無い環境ではマクロタスク 1 回ぶん待つだけにする（ブラウザでの挙動は変えない）。
+    if (typeof requestAnimationFrame !== "function") {
+      return new Promise((resolve) => setTimeout(resolve, 0));
+    }
     return new Promise((resolve) => requestAnimationFrame(() => resolve()));
   }
 
@@ -407,10 +412,42 @@
     return pts;
   }
 
+  /**
+   * `<rect>` の 4 隅（変換後の座標）。回転を含む transform でも 4 隅を個別に写すので形は保たれる。
+   * index.html（Wikipedia風出力の陸地取得）が使う。点列化の部品はすべてここに置き、
+   * index.html に写しを置かない（AGENT.md「重複定義の取り残しで〜」）。
+   */
+  function sampleRectElement(rectEl) {
+    if (!measureSvg) {
+      throw new Error("measureSvg is not set.");
+    }
+    const clone = rectEl.cloneNode(true);
+    measureSvg.appendChild(clone);
+    const x = Number(clone.getAttribute("x")) || 0;
+    const y = Number(clone.getAttribute("y")) || 0;
+    const w = Number(clone.getAttribute("width")) || 0;
+    const h = Number(clone.getAttribute("height")) || 0;
+    const rawPoints = [
+      { x, y },
+      { x: x + w, y },
+      { x: x + w, y: y + h },
+      { x, y: y + h },
+    ];
+    const points = rawPoints.map((pt) => applyTransform(pt, clone));
+    measureSvg.removeChild(clone);
+    return points;
+  }
+
   function distance(a, b) {
     const dx = a.x - b.x;
     const dy = a.y - b.y;
     return Math.hypot(dx, dy);
+  }
+
+  function distanceSq(a, b) {
+    const dx = a.x - b.x;
+    const dy = a.y - b.y;
+    return dx * dx + dy * dy;
   }
 
   function removeSequentialDuplicates(points, eps) {
@@ -1856,5 +1893,27 @@
     isFrameOnlySeaFace,
     collectSeamRuns,
     groupSeamPolygons,
+    // 要素の点列化と座標変換（index.html もこれを使う。写しを置かないこと）
+    applyTransform,
+    samplePolylineElement,
+    sampleLineElement,
+    sampleRectElement,
+    // 純粋な幾何の部品（index.html と test/ が使う）
+    distance,
+    distanceSq,
+    removeSequentialDuplicates,
+    segmentIntersections,
+    pointSegmentProjection,
+    polygonArea,
+    pointInRingIndices,
+    ringBounds,
+    pointOnOpenSegment,
+    properlyCrosses,
   };
-})(window);
+
+  // Node（`node --test`）から require できるようにする。ブラウザの <script> では
+  // module が無いので何もしない。
+  if (typeof module === "object" && module && module.exports) {
+    module.exports = global.DerleLogic;
+  }
+})(typeof window !== "undefined" ? window : globalThis);
