@@ -17,33 +17,166 @@
     return new Promise((resolve) => requestAnimationFrame(() => resolve()));
   }
 
-  function splitPathData(d) {
-    if (!d) return [];
+  // --- `d` のサブパス分割 -------------------------------------------------------
+  //
+  // 点列化はサブパス（M/m で始まる 1 区切り）ごとに行う（AGENT.md「複数サブパスの誤結線」）。
+  // 切り出したサブパスは単独の `d` として解釈されるが、SVG では **`d` の最初の `m` は
+  // 絶対 `M` として解釈される**。2 つ目以降のサブパスが相対 `m` で始まっていると、
+  // 本来「直前のサブパスの現在点からの相対」だった始点が原点からの絶対座標に化け、
+  // エラーも警告も出ないまま形だけが移動する（旧実装はこれを数えて警告するだけだった）。
+  //
+  // そこで分割しながら現在点を追い、相対 `m` で始まるサブパスは始点を絶対 `M x y` に
+  // 書き換えて返す。`m` の後ろに続く座標対は暗黙の相対 `l` なので、`M x y l …` として
+  // 相対のまま残す。それ以外のコマンドの文字列は元のまま（絶対 `M` で始まるサブパスは
+  // 1 文字も変えない）。
+
+  const PATH_PARAM_COUNT = {
+    M: 2, L: 2, T: 2, H: 1, V: 1, C: 6, S: 4, Q: 4, A: 7, Z: 0,
+  };
+  const PATH_NUMBER_RE = /[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?/y;
+
+  /** 旧実装（現在点を追わない単純な分割）。パスデータが壊れているときだけ使う。 */
+  function splitPathDataNaive(d) {
     return d.trim().split(/(?=[Mm])/).map((part) => part.trim()).filter(Boolean);
   }
 
-  /**
-   * レイヤー内に「2 つ目以降のサブパスが相対 `m` で始まる `d`」がいくつあるかを数える。
-   *
-   * サブパスは単独の点列として扱うが、SVG では **パスの最初の `m` は絶対 `M` として
-   * 解釈される**。そのため相対 `m` で始まる 2 つ目以降のサブパスを切り出すと、本来
-   * 「直前のサブパスの終点からの相対」だった始点が原点からの絶対座標に化け、**エラーも
-   * 警告も出ないまま図形だけが移動する**。
-   *
-   * 現在の原図は全サブパスが絶対 `M` なので実害は無い（実測 0 件）。Illustrator の
-   * 書き出し設定が変わった日に無症状で発症する種類の問題なので、数えて表に出す。
-   */
-  function countRelativeSubpathStarts(layerEl) {
-    if (!layerEl) return 0;
-    let count = 0;
-    const paths = layerEl.querySelectorAll("path");
-    for (let i = 0; i < paths.length; i += 1) {
-      const parts = splitPathData(paths[i].getAttribute("d") || "");
-      for (let k = 1; k < parts.length; k += 1) {
-        if (parts[k].charCodeAt(0) === 109) count += 1; // 'm'
+  function isPathSeparator(code) {
+    // 空白（SP, TAB, LF, FF, CR）とカンマ
+    return code === 32 || code === 9 || code === 10 || code === 12 || code === 13 || code === 44;
+  }
+
+  function splitPathData(d) {
+    if (!d) return [];
+    const src = String(d);
+    // 2 文字目以降に相対 m が無ければ、書き換えるサブパスが無いので単純な分割と同じ結果になる。
+    // 原図のほとんどの `d` はこれ（全体を読むより 1 桁速い）
+    if (src.indexOf("m", src.search(/\S/) + 1) === -1) return splitPathDataNaive(src);
+    const n = src.length;
+    let pos = 0;
+
+    const skipSeparators = () => {
+      while (pos < n && isPathSeparator(src.charCodeAt(pos))) pos += 1;
+    };
+    // 数値を 1 つ読む。読めなければ null（pos は動かさない）
+    const readNumber = () => {
+      skipSeparators();
+      PATH_NUMBER_RE.lastIndex = pos;
+      const m = PATH_NUMBER_RE.exec(src);
+      if (!m) return null;
+      pos += m[0].length;
+      return Number(m[0]);
+    };
+    // 円弧のフラグは 1 文字の 0/1。"a5 5 0 1010 10" のように区切りなしで詰めて書ける
+    // ので、数値として読むと "1010" を 1 つの数にしてしまう
+    const readFlag = () => {
+      skipSeparators();
+      const c = src[pos];
+      if (c !== "0" && c !== "1") return null;
+      pos += 1;
+      return c === "1" ? 1 : 0;
+    };
+    // 次がコマンド文字か終端か（＝このコマンドの引数が尽きたか）
+    const atCommandOrEnd = () => {
+      skipSeparators();
+      if (pos >= n) return true;
+      const c = src.charCodeAt(pos);
+      // 'e'/'E' は数値の指数にしか現れないので、ここではコマンドとして扱わない
+      return ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) && c !== 69 && c !== 101;
+    };
+
+    const parts = [];
+    let x = 0;
+    let y = 0;
+    let startX = 0;
+    let startY = 0;
+    let partStart = -1; // 今のサブパスの先頭位置（src 内）
+    let prefix = null; // 今のサブパスの先頭を書き換えるとき { text, resumeAt }
+    const flush = (end) => {
+      if (partStart < 0) return;
+      const text = prefix
+        ? prefix.text + src.slice(prefix.resumeAt, end)
+        : src.slice(partStart, end);
+      const trimmed = text.trim();
+      if (trimmed) parts.push(trimmed);
+    };
+
+    skipSeparators();
+    // M/m より前に何かある（壊れた `d`）。ブラウザは描かない。旧実装と同じ扱いにする
+    if (pos < n && src[pos] !== "M" && src[pos] !== "m") return splitPathDataNaive(src);
+
+    while (true) {
+      skipSeparators();
+      if (pos >= n) break;
+      const cmd = src[pos];
+      const upper = cmd.toUpperCase();
+      const count = PATH_PARAM_COUNT[upper];
+      if (count === undefined) return splitPathDataNaive(src); // 未知の文字
+      const cmdPos = pos;
+      pos += 1;
+      const rel = cmd !== upper;
+
+      if (upper === "M") {
+        flush(cmdPos);
+        partStart = cmdPos;
+        prefix = null;
+        const dx = readNumber();
+        const dy = dx === null ? null : readNumber();
+        if (dy === null) return splitPathDataNaive(src);
+        // `d` の最初の m は絶対として解釈される（SVG 仕様）
+        const relStart = rel && parts.length > 0;
+        x = (rel ? x : 0) + dx;
+        y = (rel ? y : 0) + dy;
+        startX = x;
+        startY = y;
+        if (relStart) {
+          // 続く座標対（暗黙の相対 l）は元の文字列のまま、`l` を補って残す
+          prefix = { text: `M${x} ${y}`, resumeAt: pos };
+          skipSeparators();
+          if (!atCommandOrEnd()) prefix.text += "l";
+          prefix.resumeAt = pos;
+        }
+        // 残りの座標対は暗黙の L / l
+        while (!atCommandOrEnd()) {
+          const px = readNumber();
+          const py = px === null ? null : readNumber();
+          if (py === null) return splitPathDataNaive(src);
+          x = (rel ? x : 0) + px;
+          y = (rel ? y : 0) + py;
+        }
+        continue;
       }
+
+      if (upper === "Z") {
+        x = startX;
+        y = startY;
+        continue;
+      }
+
+      // 引数の組を、次のコマンド文字が来るまで繰り返し読む（同じコマンドの暗黙の繰り返し）
+      let groups = 0;
+      while (!atCommandOrEnd()) {
+        const v = [];
+        for (let k = 0; k < count; k += 1) {
+          const isFlag = upper === "A" && (k === 3 || k === 4);
+          const value = isFlag ? readFlag() : readNumber();
+          if (value === null) return splitPathDataNaive(src);
+          v.push(value);
+        }
+        if (upper === "H") {
+          x = (rel ? x : 0) + v[0];
+        } else if (upper === "V") {
+          y = (rel ? y : 0) + v[0];
+        } else {
+          // 終点はどのコマンドでも最後の 2 つ
+          x = (rel ? x : 0) + v[count - 2];
+          y = (rel ? y : 0) + v[count - 1];
+        }
+        groups += 1;
+      }
+      if (groups === 0) return splitPathDataNaive(src); // 引数の無い描画コマンド
     }
-    return count;
+    flush(n);
+    return parts;
   }
 
   function applyTransform(point, element) {
@@ -208,7 +341,9 @@
     };
     while (i < tokens.length) {
       const token = tokens[i];
-      if (/[A-Za-z]/.test(token)) {
+      // コマンドは 1 文字。`/[A-Za-z]/` で判定すると指数表記の数値（"1e1"）の e に反応して、
+      // 暗黙の繰り返しの先頭に来た指数表記の数値をコマンドと取り違える（読み飛ばして形が欠ける）
+      if (token.length === 1 && /[A-Za-z]/.test(token)) {
         // 2 本目以降のサブパスに入ったら打ち切る（1 サブパス = 1 点列の契約）
         if (started && (token === "M" || token === "m")) break;
         cmd = token;
@@ -1873,7 +2008,6 @@
     samplePathElementFromData,
     pathDataToPoints,
     splitPathData,
-    countRelativeSubpathStarts,
     // 領有関係（要件定義書 §6.3）
     computeOwnership,
     computeContainment,

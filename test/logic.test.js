@@ -72,6 +72,12 @@ test("pathDataToPoints: 数値の書き方（区切りなし・小数点の連�
   assertPointsClose(L.pathDataToPoints("M1e1,2E-1l+3,-.5", 0.05, 0), [P(10, 0.2), P(13, -0.3)]);
 });
 
+test("pathDataToPoints: 暗黙の繰り返しの先頭が指数表記でもコマンドと取り違えない", () => {
+  // 以前は "1e1" の e をコマンド文字と見なし、2 組目の座標を読み飛ばしていた
+  assertPointsClose(L.pathDataToPoints("M0 0l1 1 1e1,0", 0.05, 0), [P(0, 0), P(1, 1), P(11, 1)]);
+  assertPointsClose(L.pathDataToPoints("M0 0L1 1 1.5E+1 2", 0.05, 0), [P(0, 0), P(1, 1), P(15, 2)]);
+});
+
 test("pathDataToPoints: 最初のサブパスだけを返す（1 サブパス = 1 点列の契約）", () => {
   assertPointsClose(L.pathDataToPoints("M0 0L1 0M5 5L6 6", 0.05, 0), [P(0, 0), P(1, 0)]);
 });
