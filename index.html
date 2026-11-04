@@ -3088,16 +3088,6 @@
           ? `橋渡し: ${bridgeResult.bridges.length}箇所（交差のため棄却: ${bridgeResult.rejected}箇所）`
           : "橋渡し: 無効";
 
-        // 相対 m で始まるサブパスは、単独で切り出すと座標が黙って移動する（logic.js の
-        // countRelativeSubpathStarts のコメント参照）。今の原図には無いが、書き出し設定が
-        // 変わったときに無症状で発症するので、見つけたら必ず表に出す。
-        const relativeStarts =
-          DerleLogic.countRelativeSubpathStarts(borderLayer) +
-          (coastLayer ? DerleLogic.countRelativeSubpathStarts(coastLayer) : 0);
-        const relativeMessage = relativeStarts > 0
-          ? `⚠ 相対 m で始まるサブパスが ${relativeStarts} 件あります。その形の座標がずれている可能性があります。`
-          : null;
-
         setStatus([
           `グラフを構築しました。`,
           `点: ${graph.points.length}`,
@@ -3105,7 +3095,6 @@
           `線分: ${finalSegments.length}`,
           bridgeMessage,
           coastMessage,
-          relativeMessage,
         ].filter(Boolean).join("\n"));
       } catch (error) {
         // 落ちたまま state.graph に半端なものを残さない（抽出が古い形で走るため）
