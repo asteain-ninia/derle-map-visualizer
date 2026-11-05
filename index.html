@@ -487,6 +487,10 @@
       seam: null,
       seamFeatures: [],
       polygonPieces: [],
+      // 地物 id → 穴（内包された面を切り抜くリング）。画面の塗り・選択・面積だけが使う（要件定義書 §6.7）
+      featureHoles: new Map(),
+      // 穴のリングの辺 edgeKey → その穴を開けている地物 id の Set（選択の外周線を引くときに使う）
+      holeEdgeParents: new Map(),
       wikiOutput: {
         pointVectors: null,
         polygonRings: new Map(),
@@ -975,7 +979,8 @@
       const ctx1 = c1.getContext("2d");
       ctx1.fillStyle = "white";
       // 選択ポリゴンは1つのパスにまとめて1回で塗る（別々に塗ると隣接ポリゴンの共有境界でアンチエイリアスのアルファが重なり、被覆率が1未満になる）。
-      // 向きを揃えて非ゼロ規則で塗ることで、共有境界は継ぎ目なく、重なり（包領など）は和集合として塗られる。
+      // 向きを揃えて非ゼロ規則で塗ることで、共有境界は継ぎ目なく塗られる。内包された面の穴（hole）は
+      // 逆向きにするので、外側の地物だけを選べば穴は数えず、内側の面も選べば穴が埋まって和集合になる。
       ctx1.beginPath();
       boxes.forEach((box) => {
         const pts = box.ring.map((idx) => state.graph.points[idx]);
@@ -985,7 +990,7 @@
           const b = pts[(i + 1) % pts.length];
           signed += a.x * b.y - b.x * a.y;
         }
-        if (signed < 0) pts.reverse();
+        if (box.hole ? signed > 0 : signed < 0) pts.reverse();
         pts.forEach((p, i) => {
           const cx = (p.x - minX) * scl;
           const cy = (p.y - minY) * scl;
@@ -1053,9 +1058,12 @@
       // 選択地物のリングをバウンディングボックスが重なるもの同士でまとめ、まとまりごとにCanvasで測る。
       // 継ぎ目をまたぐ地物（西端と東端のピース）を1枚のCanvasで測ると地図全幅のボックスになり解像度が落ちるため。
       // ボックスが重ならないまとまり同士は重ならないので、合計しても二重計上しない（包領などの重なりは同じまとまり内で和集合になる）。
+      // 内包された面の穴も（hole: true として）入れる。穴は外周の内側にあるので同じまとまりに入る。
       const ringBoxes = [];
       selectedPolys.forEach((poly) => {
-        getPolygonRings(poly).forEach((ring) => {
+        const rings = getPolygonRings(poly).map((ring) => ({ ring, hole: false }))
+          .concat(getFeatureHoles(poly).map((h) => ({ ring: h.ring, hole: true })));
+        rings.forEach(({ ring, hole }) => {
           let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
           ring.forEach((idx) => {
             const p = state.graph.points[idx];
@@ -1064,7 +1072,7 @@
             if (p.x > maxX) maxX = p.x;
             if (p.y > maxY) maxY = p.y;
           });
-          ringBoxes.push({ ring, minX, minY, maxX, maxY });
+          ringBoxes.push({ ring, hole, minX, minY, maxX, maxY });
         });
       });
       const clusters = clusterBoxes(ringBoxes);
@@ -1605,6 +1613,9 @@
           onlyPolyId = id;
         });
         if (!state.selectedPolygons.has(onlyPolyId)) return;
+        // 内包された面の外周は、外側の地物から見ると穴の縁。両方を選んでいれば選択どうしの境界なので引かない
+        const holeParents = state.holeEdgeParents.get(edgeKey(info.a, info.b));
+        if (holeParents && [...holeParents].some((id) => state.selectedPolygons.has(id))) return;
         const a = state.graph.points[info.a];
         const b = state.graph.points[info.b];
         if (!a || !b) return;
@@ -1719,8 +1730,10 @@
         ["地物名", formatSelectionLabels(state.polygonLabels && state.polygonLabels.get(id))],
         ["種別", escapeHtml(state.polygonTypes.get(id) || "不明")],
         ["面 id", escapeHtml(id)],
-        ["面積", poly ? poly.area.toFixed(2) : "—"],
+        ["面積", poly ? getFeatureNetArea(poly).toFixed(2) : "—"],
       ];
+      const holes = poly ? getFeatureHoles(poly) : [];
+      if (holes.length) rows.push(["内側にある面", `${holes.length}面（塗り・面積から除く）`]);
       const parent = state.polygonParents.get(id);
       if (parent) rows.push(["内包する面", escapeHtml(parent)]);
       const owner = state.polygonOwners.get(id);
@@ -1737,6 +1750,16 @@
       if (owned.length) rows.push(["領有している面", `${owned.length}面`]);
 
       box.innerHTML = `<dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>`;
+    }
+
+    /**
+     * 地物の面積（地図単位）。内包された面の穴は除く（画面の塗り・面積表示と揃える）。
+     * 面の符号付き面積は抽出の向きで正負どちらにもなるので、ピース（リング）ごとに絶対値で足す。
+     */
+    function getFeatureNetArea(poly) {
+      const outer = getPolygonRings(poly)
+        .reduce((sum, ring) => sum + Math.abs(DerleLogic.polygonArea(ring, state.graph.points)), 0);
+      return getFeatureHoles(poly).reduce((sum, hole) => sum - hole.area, outer);
     }
 
     function escapeHtml(value) {
@@ -2144,6 +2167,8 @@
       state.seam = null;
       state.seamFeatures = [];
       state.polygonPieces = [];
+      state.featureHoles = new Map();
+      state.holeEdgeParents = new Map();
       state.polygonEdgeIndex = null;
       state.polygonTypes = new Map();
       state.polygonParents = new Map();
@@ -2348,6 +2373,8 @@
         state.seam = null;
         state.seamFeatures = [];
         state.polygonPieces = [];
+        state.featureHoles = new Map();
+        state.holeEdgeParents = new Map();
         state.sharedSeaInfo = null;
         state.polygonEdgeIndex = null;
         state.polygonTypes.clear();
@@ -2685,6 +2712,9 @@
           });
         }
 
+        await step("内包された面を外側の面から切り抜き中...");
+        attachFeatureHoles();
+
         await step("ラベルを面へ対応付け中...");
         state.polygonLabels = collectPolygonLabels();
 
@@ -2743,6 +2773,34 @@
       }
     }
 
+    /**
+     * 画面表示の穴（要件定義書 §6.7）。内包された面（包領、共有する海の中の島など）を外側の
+     * 地物から切り抜き、塗り・クリック・選択の暗転・選択の外周線・面積がその面を外側の地物に
+     * 含めないようにする。判定は .gimoza の書き出しと同じ部品（DerleLogic.computeFeatureHoles →
+     * computeFaceHoles。現状.md 重要度低 1）。
+     * 穴は地物の rings とは別に持つ。rings は国タイプ判定・領有関係・ラベル・球面出力・書き出しが
+     * 使うので変えない（球面出力は「一番上の領域だけを見せる」方針で、領有された島を領有する側と
+     * 同じ色で塗る。要件定義書 §6.9）。
+     */
+    function attachFeatureHoles() {
+      state.featureHoles = DerleLogic.computeFeatureHoles(state.polygonPieces, state.graph.points);
+      state.holeEdgeParents = new Map();
+      state.featureHoles.forEach((holes, featureId) => {
+        holes.forEach(({ ring }) => {
+          for (let i = 0; i < ring.length; i += 1) {
+            const key = edgeKey(ring[i], ring[(i + 1) % ring.length]);
+            if (!state.holeEdgeParents.has(key)) state.holeEdgeParents.set(key, new Set());
+            state.holeEdgeParents.get(key).add(featureId);
+          }
+        });
+      });
+    }
+
+    /** 地物の穴（attachFeatureHoles）。無ければ空配列。 */
+    function getFeatureHoles(poly) {
+      return state.featureHoles.get(String(poly.id)) || [];
+    }
+
     function drawEdges() {
       if (!state.graph || !state.overlaySvg) return;
       if (!el.showEdges.checked) return;
@@ -2789,7 +2847,11 @@
       state.polygons.forEach((poly) => {
         const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
         // 継ぎ目をまたぐ地物は全ピースを1つのpathにまとめる（どのピースをクリックしても同じ地物）。
-        const d = getPolygonRings(poly).map((ring) => ring.map((idx, i) => {
+        // 内包された面は穴として同じpathに足す（外周と逆回りなので既定の nonzero で抜ける）。
+        // 穴の部分はこの地物の塗りにならないので、そこをクリックすると内側の面が選ばれ、
+        // 選択の暗転（updateSelectionOverlay の evenodd）でも内側の面は暗くなる。
+        const rings = getPolygonRings(poly).concat(getFeatureHoles(poly).map((hole) => hole.ring));
+        const d = rings.map((ring) => ring.map((idx, i) => {
           const p = state.graph.points[idx];
           return `${i === 0 ? "M" : "L"}${p.x} ${p.y}`;
         }).join(" ") + " Z").join(" ");
