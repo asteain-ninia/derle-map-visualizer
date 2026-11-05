@@ -211,6 +211,38 @@
       cursor: pointer;
     }
 
+    /* 矩形選択（ドラッグで囲んだ面をまとめて選ぶ）。囲みの枠と「選ばれる面」の下見は
+       拡大率によらず画面上で同じ太さに見せる */
+    .rect-select-band,
+    .rect-select-preview {
+      pointer-events: none;
+    }
+
+    .rect-select-band,
+    .rect-select-preview path {
+      vector-effect: non-scaling-stroke;
+    }
+
+    body.rect-selecting,
+    body.rect-selecting * {
+      user-select: none;
+      cursor: crosshair !important;
+    }
+
+    .rect-select-badge {
+      position: fixed;
+      z-index: 10;
+      display: none;
+      pointer-events: none;
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid var(--panel-border);
+      background: rgba(11, 15, 21, 0.88);
+      color: var(--text);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
     .legend {
       display: grid;
       gap: 6px;
@@ -331,6 +363,7 @@
       <div id="selectionInfo" class="selection-info">
         <div class="placeholder">多角形をクリックすると内容を表示します。</div>
       </div>
+      <div class="note">クリックで選択、Shift+クリックで追加・解除。<br>ドラッグで囲むと、囲みに<strong>すっぽり収まった面</strong>をまとめて選択します（Shift+ドラッグで追加、Alt（または Ctrl）+ドラッグで解除、Esc で取り消し）。</div>
     </div>
 
     <details class="group">
@@ -2597,8 +2630,18 @@
     }
 
     function handleOverlayClick(event) {
+      // 矩形選択のドラッグを終えた（取り消した）ときの click は選択操作ではない
+      if (suppressOverlayClick) {
+        suppressOverlayClick = false;
+        return;
+      }
+      // ボタンを押した位置の要素で判定する。押してから数 px ずれて離すと、click は押した要素と
+      // 離した要素の共通の親（多角形の外）に届き、小さな島では「空白をクリック」扱いになるため
+      const pressed = clickPressTarget;
+      clickPressTarget = null;
       if (!state.polygonsGroup) return;
-      const target = event.target instanceof Element ? event.target : null;
+      const source = pressed || event.target;
+      const target = source instanceof Element ? source : null;
       const path = target ? target.closest("path[data-poly-id]") : null;
       if (!path || !state.polygonsGroup.contains(path)) {
         if (!event.shiftKey && state.selectedPolygons.size) {
@@ -2625,6 +2668,252 @@
         }
       }
       updateSelectionDisplay();
+    }
+
+    // --- 矩形選択（地図上をドラッグして、囲みに収まった面をまとめて選ぶ。要件定義書 §6.7） ---
+    //
+    // 修飾キーなし: 置き換え / Shift: 追加 / Alt・Ctrl・⌘: 解除 / Esc: 取り消し。
+    // 判定（すっぽり収まった面だけ）と選択集合の更新は logic.js（DerleLogic）にある。
+    // 押した位置から RECT_DRAG_THRESHOLD_PX 以内しか動かなければドラッグにせず、
+    // 通常の click（handleOverlayClick）に任せる。ドラッグしたあとの click は捨てる。
+    const RECT_DRAG_THRESHOLD_PX = 4;
+    const RECT_SELECT_COLORS = { replace: "#4fc3f7", add: "#4fc3f7", remove: "#e06c75" };
+    // ドラッグ中の状態（押していないときは null）
+    let rectDrag = null;
+    // ドラッグを終えた（または取り消した）直後の click を 1 回だけ捨てる
+    let suppressOverlayClick = false;
+    // ドラッグにならなかった押下で、押した位置の要素（click の判定に使う）
+    let clickPressTarget = null;
+    let rectSelectBadge = null;
+
+    function clientToOverlayPoint(clientX, clientY) {
+      const svg = state.overlaySvg;
+      const ctm = svg ? svg.getScreenCTM() : null;
+      if (!ctm) return null;
+      const p = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse());
+      return { x: p.x, y: p.y };
+    }
+
+    function readModifiers(event) {
+      return { shiftKey: event.shiftKey, altKey: event.altKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey };
+    }
+
+    function handleOverlayPointerDown(event) {
+      // 新しく押したら、前回の「click を捨てる」は持ち越さない
+      suppressOverlayClick = false;
+      clickPressTarget = null;
+      if (rectDrag) teardownRectDrag();
+      // 左ボタンのマウス・ペンだけ。タッチは指でのスクロールを妨げないよう対象外
+      if (event.button !== 0 || !event.isPrimary || event.pointerType === "touch") return;
+      // クリック選択と同じく、多角形が表示されているときだけ（外側面などは元から path が無い）
+      if (!state.polygonsGroup || !state.graph) return;
+      const start = clientToOverlayPoint(event.clientX, event.clientY);
+      if (!start) return;
+      rectDrag = {
+        pointerId: event.pointerId,
+        startClient: { x: event.clientX, y: event.clientY },
+        // 始点は地図座標で持つ。ドラッグ中にホイールで拡大縮小しても始点が地図に貼り付いたままになる
+        startMap: start,
+        lastClient: { x: event.clientX, y: event.clientY },
+        downTarget: event.target,
+        modifiers: readModifiers(event),
+        active: false,
+        group: state.polygonsGroup,
+        index: null,
+        mode: "replace",
+        hits: [],
+        band: null,
+        preview: null,
+        previewPaths: new Map(),
+        frame: null,
+      };
+    }
+
+    function handleRectDragPointerMove(event) {
+      if (!rectDrag || event.pointerId !== rectDrag.pointerId) return;
+      rectDrag.lastClient = { x: event.clientX, y: event.clientY };
+      rectDrag.modifiers = readModifiers(event);
+      if (!rectDrag.active) {
+        if (!DerleLogic.exceedsDragThreshold(rectDrag.startClient, rectDrag.lastClient, RECT_DRAG_THRESHOLD_PX)) return;
+        activateRectDrag();
+      }
+      event.preventDefault();
+      scheduleRectDragUpdate();
+    }
+
+    function activateRectDrag() {
+      const drag = rectDrag;
+      drag.active = true;
+      try {
+        state.overlaySvg.setPointerCapture(drag.pointerId);
+      } catch (_) {
+        // 捕捉できなくても window で拾っているので続ける
+      }
+      // 面ごとの外接矩形は 1 度だけ求める（以後の判定は矩形の比較だけ）。
+      // 画面に path がある面だけを対象にする（クリックで選べる面と同じ集合）
+      const selectable = state.polygons
+        .filter((poly) => state.polygonPaths.has(String(poly.id)))
+        .map((poly) => ({ id: poly.id, rings: getPolygonRings(poly) }));
+      drag.index = DerleLogic.buildRectSelectionIndex(selectable, state.graph.points);
+
+      const ns = "http://www.w3.org/2000/svg";
+      drag.preview = document.createElementNS(ns, "g");
+      drag.preview.classList.add("rect-select-preview");
+      drag.preview.setAttribute("fill-opacity", "0.45");
+      drag.preview.setAttribute("stroke-width", "1.5");
+      drag.band = document.createElementNS(ns, "rect");
+      drag.band.classList.add("rect-select-band");
+      drag.band.setAttribute("fill-opacity", "0.12");
+      drag.band.setAttribute("stroke-width", "1");
+      state.overlaySvg.appendChild(drag.preview);
+      state.overlaySvg.appendChild(drag.band);
+
+      if (!rectSelectBadge) {
+        rectSelectBadge = document.createElement("div");
+        rectSelectBadge.className = "rect-select-badge";
+        document.body.appendChild(rectSelectBadge);
+      }
+      document.body.classList.add("rect-selecting");
+    }
+
+    function scheduleRectDragUpdate() {
+      if (!rectDrag || !rectDrag.active || rectDrag.frame !== null) return;
+      rectDrag.frame = requestAnimationFrame(() => {
+        if (!rectDrag) return;
+        rectDrag.frame = null;
+        updateRectDrag();
+      });
+    }
+
+    /** 囲みの枠・下見・件数表示を今のポインタ位置と修飾キーに合わせる。 */
+    function updateRectDrag() {
+      const drag = rectDrag;
+      if (!drag || !drag.active) return;
+      // ドラッグ中に抽出し直すなどで多角形が描き直されたら、索引が古いので取り消す
+      if (state.polygonsGroup !== drag.group || !state.overlaySvg.contains(drag.band)) {
+        cancelRectDrag();
+        return;
+      }
+      const current = clientToOverlayPoint(drag.lastClient.x, drag.lastClient.y);
+      if (!current) return;
+      const rect = DerleLogic.rectFromCorners(drag.startMap, current);
+      drag.mode = DerleLogic.rectSelectionMode(drag.modifiers);
+      drag.hits = DerleLogic.collectRectSelectionHits(drag.index, rect);
+      const color = RECT_SELECT_COLORS[drag.mode];
+
+      drag.band.setAttribute("x", rect.minX);
+      drag.band.setAttribute("y", rect.minY);
+      drag.band.setAttribute("width", rect.maxX - rect.minX);
+      drag.band.setAttribute("height", rect.maxY - rect.minY);
+      drag.band.setAttribute("fill", color);
+      drag.band.setAttribute("stroke", color);
+      if (drag.mode === "remove") {
+        drag.band.setAttribute("stroke-dasharray", "5 3");
+      } else {
+        drag.band.removeAttribute("stroke-dasharray");
+      }
+
+      // 下見: 確定したら選択が変わる面だけを塗る（解除なら、いま選ばれていて外れる面）
+      const selected = state.selectedPolygons;
+      const shown = drag.mode === "remove" ? drag.hits.filter((id) => selected.has(id)) : drag.hits;
+      drag.preview.setAttribute("fill", color);
+      drag.preview.setAttribute("stroke", color);
+      const keep = new Set(shown);
+      drag.previewPaths.forEach((node, id) => {
+        if (keep.has(id)) return;
+        node.remove();
+        drag.previewPaths.delete(id);
+      });
+      shown.forEach((id) => {
+        if (drag.previewPaths.has(id)) return;
+        const source = state.polygonPaths.get(id);
+        if (!source) return;
+        const node = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        node.setAttribute("d", source.getAttribute("d"));
+        drag.preview.appendChild(node);
+        drag.previewPaths.set(id, node);
+      });
+
+      const next = DerleLogic.applyRectSelection(selected, drag.hits, drag.mode);
+      let text;
+      if (drag.mode === "replace") {
+        text = `${drag.hits.length} 面を選択`;
+      } else if (drag.mode === "add") {
+        text = `+${next.size - selected.size} 面を追加（計 ${next.size} 面）`;
+      } else {
+        text = `−${selected.size - next.size} 面を解除（計 ${next.size} 面）`;
+      }
+      rectSelectBadge.textContent = text;
+      rectSelectBadge.style.borderColor = color;
+      rectSelectBadge.style.left = `${drag.lastClient.x + 14}px`;
+      rectSelectBadge.style.top = `${drag.lastClient.y + 16}px`;
+      rectSelectBadge.style.display = "block";
+    }
+
+    function teardownRectDrag() {
+      const drag = rectDrag;
+      rectDrag = null;
+      if (!drag) return;
+      if (drag.frame !== null) cancelAnimationFrame(drag.frame);
+      if (drag.band) drag.band.remove();
+      if (drag.preview) drag.preview.remove();
+      if (rectSelectBadge) rectSelectBadge.style.display = "none";
+      document.body.classList.remove("rect-selecting");
+      if (drag.active && state.overlaySvg) {
+        try {
+          if (state.overlaySvg.hasPointerCapture(drag.pointerId)) {
+            state.overlaySvg.releasePointerCapture(drag.pointerId);
+          }
+        } catch (_) {
+          // 既に解放済み
+        }
+      }
+    }
+
+    /** ドラッグを取り消す（選択は変えない）。ボタンを離したときの click も捨てる。 */
+    function cancelRectDrag() {
+      if (!rectDrag) return;
+      suppressOverlayClick = true;
+      teardownRectDrag();
+    }
+
+    function handleRectDragPointerUp(event) {
+      if (!rectDrag || event.pointerId !== rectDrag.pointerId) return;
+      if (!rectDrag.active) {
+        // 閾値以内しか動いていない＝クリック。click イベントの処理に任せる
+        clickPressTarget = rectDrag.downTarget;
+        rectDrag = null;
+        return;
+      }
+      rectDrag.lastClient = { x: event.clientX, y: event.clientY };
+      rectDrag.modifiers = readModifiers(event);
+      updateRectDrag();
+      if (!rectDrag) return; // updateRectDrag の中で取り消された
+      const next = DerleLogic.applyRectSelection(state.selectedPolygons, rectDrag.hits, rectDrag.mode);
+      const changed = next.size !== state.selectedPolygons.size
+        || [...next].some((id) => !state.selectedPolygons.has(id));
+      suppressOverlayClick = true;
+      teardownRectDrag();
+      if (!changed) return;
+      // Set を差し替えず中身を入れ替える（クリック選択と同じ集合を使い続ける）
+      state.selectedPolygons.clear();
+      next.forEach((id) => state.selectedPolygons.add(id));
+      updateSelectionDisplay();
+    }
+
+    function handleRectDragKey(event) {
+      if (!rectDrag) return;
+      if (event.type === "keydown" && event.key === "Escape") {
+        event.preventDefault();
+        cancelRectDrag();
+        return;
+      }
+      if (!rectDrag.active) return;
+      if (!["Shift", "Alt", "Control", "Meta"].includes(event.key)) return;
+      // Alt を離したときにブラウザのメニューへフォーカスが移らないようにする
+      if (event.key === "Alt") event.preventDefault();
+      rectDrag.modifiers = readModifiers(event);
+      scheduleRectDragUpdate();
     }
 
     function hasDashValue(value) {
@@ -2769,6 +3058,7 @@
       overlaySvg.setAttribute("viewBox", state.viewBox);
       overlaySvg.classList.add("overlay-svg");
       overlaySvg.addEventListener("click", handleOverlayClick);
+      overlaySvg.addEventListener("pointerdown", handleOverlayPointerDown);
 
       el.svgStack.appendChild(baseSvg);
       el.svgStack.appendChild(overlaySvg);
@@ -3675,6 +3965,18 @@
     el.toggleLandBtn.addEventListener("click", () => toggleLayerGroup(landLayerIds));
     el.toggleOtherBtn.addEventListener("click", toggleOtherLayers);
     el.mapHost.addEventListener("wheel", handleWheelZoom, { passive: false });
+    // 矩形選択。ポインタを捕捉するが、捕捉に失敗しても拾えるよう window で受ける。
+    // ドラッグ中にホイールで拡大縮小・スクロールしたら、囲みを地図に合わせて描き直す
+    window.addEventListener("pointermove", handleRectDragPointerMove);
+    window.addEventListener("pointerup", handleRectDragPointerUp);
+    window.addEventListener("pointercancel", (event) => {
+      if (rectDrag && event.pointerId === rectDrag.pointerId) cancelRectDrag();
+    });
+    window.addEventListener("blur", cancelRectDrag);
+    window.addEventListener("keydown", handleRectDragKey);
+    window.addEventListener("keyup", handleRectDragKey);
+    el.mapHost.addEventListener("scroll", scheduleRectDragUpdate);
+    el.mapHost.addEventListener("wheel", scheduleRectDragUpdate, { passive: true });
     el.showTypes.addEventListener("change", () => {
       updatePolygonFills();
       updateTypeLegendVisibility();
