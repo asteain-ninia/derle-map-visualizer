@@ -256,7 +256,7 @@
 - logic.js / gimoza.js はブラウザの `<script>` 用のまま、末尾で `module.exports` があるときだけ公開する（`})(typeof window !== "undefined" ? window : globalThis);`）。**package.json は `"type": "commonjs"`** にしてある。`"module"` にすると .js が ESM 扱いになり、この 2 ファイルを `require` できなくなる。
 - gimoza.js は幾何の部品を `DerleLogic` に頼るので、テストでは **logic.js を先に `require`** する。
 - `nextFrame` は `requestAnimationFrame` が無い環境では `setTimeout(0)` で待つ（Node で `onProgress` 付きの非同期関数を呼んでも止まらない）。ブラウザでの挙動は同じ。
-- テストできないもの: `getCTM` で座標変換する点列化（`samplePathElement` など）は DOM が要るので `logic_test.html`（ブラウザで開く）側。球面投影・国タイプ判定は index.html の中にあるので未テスト（現状.md 設計 4）。
+- テストできないもの: `getCTM` で座標変換する点列化（`samplePathElement` など）は DOM が要るので `logic_test.html`（ブラウザで開く）側。球面投影・国タイプ判定は logic.js へ移したので `test/sphere.test.js` / `test/country-type.test.js` で見ている（下の「球面投影・国タイプ判定を logic.js へ移してテストする」）。
 - **index.html を触る変更の前後比較は Playwright で行う**（chromium は入っている）。`python3 -m http.server` で配信し、ページ内で `fetch` した原図を `loadSvgText()` に渡してから `await buildGraph()` → `await extractPolygons()` → `scheduleWikipediaUpdate(true)` → `exportGimoza()` を順に呼ぶ。`state` や関数はインラインスクリプトの大域なので `page.evaluate` からそのまま触れる。点・辺・面の数に加えて、**点座標・面のリング・陸地パス・球面 SVG・`.gimoza` のバイト列のハッシュ**を比べる（`.gimoza` は同じ入力なら毎回バイト一致する＝決定的なので、ハッシュ比較が使える）。
   - `page.setInputFiles("#fileInput", …)` では読み込みが始まらなかった（原因は追っていない）。`fetch` → `loadSvgText` なら確実。
   - BUR080809・既定設定の基準値（2026-11-04 時点）: 点 45,331 / 辺 45,764 / 線分 49,351 / 橋渡し 71 / 地物 688（ピース 689）/ 陸地パス 549 / `.gimoza` 1,314,850 バイト（間引き版・目標 16,500 頂点、面 772）。
@@ -286,3 +286,18 @@
   - 原図の 2 つ目以降のサブパス 195 個（94 パス）を**同じ形のまま相対 `m` に書き換えた SVG**を作って通した。旧実装: 点 45,358 / 辺 45,786 / 橋渡し 70 / 国タイプも 4 面変わる（=ずれていた）。新実装: 点 45,331 / 辺 45,764 / 橋渡し 71 / 地物 688 で、点座標・面のリング・陸地パス・球面 SVG まで元の SVG と完全一致。`.gimoza` は `manifest.json` がバイト一致し、`assets/basemap.img` だけが異なる（背景地図は `d` の文字列をそのまま持つので、書き換えた文字列が入るのは正しい）。
   - 旧方式（`setSampleMode("length")`）でも、原図・相対 `m` 版とも main の原図と点 94,748 / 辺 95,187 / 地物 707 / 陸地パス 553 で、点座標・リング・陸地パス・球面 SVG まで完全一致（1 回 8 分ほどかかる）。
 - **教訓: 「区切って別々に解釈する」ときは、区切りの前後で引き継がれる状態（ここでは現在点）が無いかを先に確かめる。** 文字列として切ってよいのは、各片が文脈なしで同じ意味を持つときだけ。
+
+### 球面投影・国タイプ判定を logic.js へ移してテストする
+
+- 現状.md 設計 4 への対応。index.html のインラインスクリプトにあった球面投影（`buildRotation` 〜 `clipPolygonToHemisphere`、経緯線・線の描画、辺の刻み `densifyMapSegment`）と国タイプ判定（`classifyPolygons` と、その入力を作る `collectSharedSeaPolygons` / `filterCoastSegments` / `collectBorderCoastPoints` / `collectCoastInsidePolygons` / `findPolygonIndex` など）を logic.js へ移した。index.html は冒頭近くの `const { … } = DerleLogic;` で同じ名前を受け取るので、呼び出し側の行は変えていない。
+- **state に依存する部分は引数で渡す形にして切り離した**。`mapPointToVector` は地図端の許容値（`getSeamTolerance`）を第 3 引数で、`classifyPolygons` は地図端の切断線を数えない判定（`isSeamCutEdge`。地図枠と `state.seam` を読む）を第 6 引数で受け取る。index.html にはそれを添えて呼ぶだけの薄い関数を残した。
+- 移すときに見つけた写し: 回転の式が `rotateVector`・`clipPolygonVectors`・`buildWikipediaSvgMarkup` の 3 か所、経緯度→ベクトルの式が `mapPointToVector`・`buildGraticulePath`（2 回）にあった。`rotateVectorArrays` / `lonLatDegToVector` にまとめた。**式と演算の順序はそのまま**（JS は積和を融合しないので、同じ式なら結果はビット単位で一致する）。
+- 前後比較（「テスト（`node --test`）と、置き換えの前後比較」の手順）: 点・辺・面のリング・国タイプ・領有・陸地パス・球面 SVG（49 視点 × 選択なし／4 通りの選択）・`.gimoza` のバイト列・球面プレビューのスクリーンショットまで main と完全一致。球面 SVG は `buildWikipediaSvgMarkup(中心ベクトル)` を直接呼べば視点を自由に選べる。
+- 罠: `function` 宣言は巻き上げられるが、`const { … } = DerleLogic` は**その行を実行するまで使えない**（TDZ）。今は起動時にこれらを呼ぶ処理が別名の行より後にあるので問題ないが、起動直後に走る処理を上の方へ足すときは注意。
+- テストの考え方（`test/sphere.test.js`）:
+  - 主な検査は「クリップ結果を円盤上で塗った領域」と「球面上の真の領域の正射投影」の突き合わせ。真値は**円盤の格子点を球面へ逆投影し、経緯度で領域の内外を判定**して求める。クリップの実装（弧の回転角・真裏の点）とは独立した計算なので、実装の考え違いをそのまま写さない。塗りは SVG の既定（nonzero）に合わせて巻き数で判定する。
+  - 刻んだ多角形での食い違いは実測で最大 0.06%（地平線弧の 5 度刻み・格子の粗さ・辺を弦で結ぶことによる）。許容は 0.3%。
+  - 「頂点 4 つのまま（刻まない）の AGENT.md の例は 90% 食い違う」ことも、**正しい結果としてではなく既知の制約として**テストに残した。刻む理由の記録で、クリップ側が直って長い辺でも正しくなったらこのテストを書き換える。
+  - テストが本当に効くかを**変異テスト**で確かめた: 過去の不具合（弧を入れず弦で結ぶ／常に短い弧／真裏の点で反転しない／極の輪を特別扱いしない／辺を刻まない）を 1 つずつ logic.js に戻すと、どれも複数のテストが落ちる。国タイプ判定も同様（髭を数える／交点を見ない／領内の海岸線を見ない／切断線を数える）。
+  - 無作為な視点のテストでは、難しい場面（真裏の点が内側でクリップされる、地平線の 180 度超を回る）を実際に何回通ったかも数えて assert している。乱数の種や形を変えて難しい場面を通らなくなっても、黙って緩いテストにならないように。
+- `test/country-type.test.js` の `classifyMap` は index.html の `buildGraph` / `extractPolygons` と同じ順序で部品を呼ぶ写し。**順序そのもの（段取り）はまだ index.html にあり**、テストの写しと食い違っても気づけない。段取りを logic.js へ移すのは設計 1 の続き。
