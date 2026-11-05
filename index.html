@@ -590,197 +590,24 @@
       applyZoom(state.zoom * factor, { x: event.clientX, y: event.clientY });
     }
 
-    const GEOM_EPS = 1e-6;
-
-    function pointOnSegment(point, a, b, tol) {
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const len2 = dx * dx + dy * dy;
-      const tol2 = tol * tol;
-      if (len2 <= tol2) {
-        const dist2 = (point.x - a.x) ** 2 + (point.y - a.y) ** 2;
-        return dist2 <= tol2;
-      }
-      const t = ((point.x - a.x) * dx + (point.y - a.y) * dy) / len2;
-      if (t < 0 || t > 1) return false;
-      const projX = a.x + dx * t;
-      const projY = a.y + dy * t;
-      const dist2 = (point.x - projX) ** 2 + (point.y - projY) ** 2;
-      return dist2 <= tol2;
-    }
-
-    function pointInPolygon(point, indices, points, tol) {
-      let inside = false;
-      for (let i = 0, j = indices.length - 1; i < indices.length; j = i++) {
-        const a = points[indices[i]];
-        const b = points[indices[j]];
-        if (!a || !b) continue;
-        if (tol > 0 && pointOnSegment(point, a, b, tol)) {
-          return true;
-        }
-        const intersects = (a.y > point.y) !== (b.y > point.y)
-          && point.x < ((b.x - a.x) * (point.y - a.y)) / (b.y - a.y) + a.x;
-        if (intersects) inside = !inside;
-      }
-      return inside;
-    }
-
-    // ポリゴンの外周リング列。経度180度の継ぎ目でつながった地物は複数のリング（ピース）を持つ。
-    function getPolygonRings(poly) {
-      return poly.rings || [poly.points];
-    }
-
-    function buildPolygonData(polygons, points) {
-      return polygons.map((poly) => {
-        const rings = getPolygonRings(poly).map((ring) => {
-          let minX = Infinity;
-          let minY = Infinity;
-          let maxX = -Infinity;
-          let maxY = -Infinity;
-          for (let i = 0; i < ring.length; i += 1) {
-            const p = points[ring[i]];
-            if (!p) continue;
-            if (p.x < minX) minX = p.x;
-            if (p.y < minY) minY = p.y;
-            if (p.x > maxX) maxX = p.x;
-            if (p.y > maxY) maxY = p.y;
-          }
-          return { points: ring, minX, minY, maxX, maxY };
-        });
-        return {
-          rings,
-          minX: Math.min(...rings.map((r) => r.minX)),
-          minY: Math.min(...rings.map((r) => r.minY)),
-          maxX: Math.max(...rings.map((r) => r.maxX)),
-          maxY: Math.max(...rings.map((r) => r.maxY)),
-        };
-      });
-    }
-
-    function findPolygonIndex(point, polygonData, points, tol) {
-      for (let i = 0; i < polygonData.length; i += 1) {
-        const poly = polygonData[i];
-        if (point.x < poly.minX - tol || point.x > poly.maxX + tol
-          || point.y < poly.minY - tol || point.y > poly.maxY + tol) {
-          continue;
-        }
-        for (let r = 0; r < poly.rings.length; r += 1) {
-          const ring = poly.rings[r];
-          if (point.x < ring.minX - tol || point.x > ring.maxX + tol
-            || point.y < ring.minY - tol || point.y > ring.maxY + tol) {
-            continue;
-          }
-          if (pointInPolygon(point, ring.points, points, tol)) {
-            return i;
-          }
-        }
-      }
-      return -1;
-    }
-
-    /**
-     * 「点が海岸線の上にあるか」を tolerance 以内で答える関数を作る。
-     * 線分を一様グリッドに入れて近傍セルだけを見る（海岸線は 4 万本あるので総当たりは無理）。
-     */
-    function makeCoastProximityTest(coastSegments, tolerance) {
-      if (!coastSegments || coastSegments.length === 0) return () => false;
-      const cellSize = Math.max(tolerance, GEOM_EPS) * 2;
-      const tol2 = tolerance * tolerance;
-      const grid = new Map();
-      const key = (cx, cy) => `${cx}:${cy}`;
-      coastSegments.forEach((seg) => {
-        // 線分がまたぐセルすべてに入れる（端点のセルだけだと長い線分を取りこぼす）
-        const x0 = Math.floor(Math.min(seg.a.x, seg.b.x) / cellSize);
-        const x1 = Math.floor(Math.max(seg.a.x, seg.b.x) / cellSize);
-        const y0 = Math.floor(Math.min(seg.a.y, seg.b.y) / cellSize);
-        const y1 = Math.floor(Math.max(seg.a.y, seg.b.y) / cellSize);
-        for (let cx = x0; cx <= x1; cx += 1) {
-          for (let cy = y0; cy <= y1; cy += 1) {
-            const k = key(cx, cy);
-            if (!grid.has(k)) grid.set(k, []);
-            grid.get(k).push(seg);
-          }
-        }
-      });
-
-      const distSqToSegment = (p, a, b) => {
-        const vx = b.x - a.x;
-        const vy = b.y - a.y;
-        const len2 = vx * vx + vy * vy;
-        if (len2 <= 0) return distanceSq(p, a);
-        let t = ((p.x - a.x) * vx + (p.y - a.y) * vy) / len2;
-        t = t < 0 ? 0 : t > 1 ? 1 : t;
-        const dx = p.x - (a.x + t * vx);
-        const dy = p.y - (a.y + t * vy);
-        return dx * dx + dy * dy;
-      };
-
-      return (point) => {
-        const cx = Math.floor(point.x / cellSize);
-        const cy = Math.floor(point.y / cellSize);
-        for (let dx = -1; dx <= 1; dx += 1) {
-          for (let dy = -1; dy <= 1; dy += 1) {
-            const list = grid.get(key(cx + dx, cy + dy));
-            if (!list) continue;
-            for (let i = 0; i < list.length; i += 1) {
-              if (distSqToSegment(point, list[i].a, list[i].b) <= tol2) return true;
-            }
-          }
-        }
-        return false;
-      };
-    }
-
-    function collectSharedSeaPolygons(borderGraph, borderPolygons, snap, coastSegments) {
-      if (!borderGraph || borderPolygons.length === 0) {
-        return { polygonData: [], sharedPolygons: new Set(), tolerance: 0 };
-      }
-      const degrees = new Array(borderGraph.points.length).fill(0);
-      borderGraph.edges.forEach((edge) => {
-        degrees[edge.a] += 1;
-        degrees[edge.b] += 1;
-      });
-      const polygonData = buildPolygonData(borderPolygons, borderGraph.points);
-      const tolerance = Math.max(GEOM_EPS, snap * 0.1);
-      const sharedPolygons = new Set();
-      // 要件定義書 §6.3 の「国境線が海岸線で終了し」を字義どおりに取る。
-      // 自由端が海岸線の上にあることまで確かめないと、作図で残った長さ 1 前後の「髭」
-      // （2 本の国境パスが V 字に出会う尖端の残り。実データに多数ある）を
-      // 「海岸線で終わる国境」と取り違え、その国が丸ごと共有する海に化ける。
-      // 実測: この条件を足すと共有する海の面が 64 → 28 に減り、報告された誤りが全部消える。
-      const isOnCoast = makeCoastProximityTest(coastSegments, Math.max(snap, GEOM_EPS));
-
-      borderGraph.edges.forEach((edge) => {
-        const freeEnds = [];
-        if (degrees[edge.a] === 1) freeEnds.push(borderGraph.points[edge.a]);
-        if (degrees[edge.b] === 1) freeEnds.push(borderGraph.points[edge.b]);
-        if (freeEnds.length === 0) return;
-        if (!freeEnds.some((point) => isOnCoast(point))) return;
-        const a = borderGraph.points[edge.a];
-        const b = borderGraph.points[edge.b];
-        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-        const idx = findPolygonIndex(mid, polygonData, borderGraph.points, tolerance);
-        if (idx >= 0) {
-          sharedPolygons.add(idx);
-        }
-      });
-
-      return { polygonData, sharedPolygons, tolerance };
-    }
-
-    function filterCoastSegments(segments, polygonData, points, sharedPolygons, tolerance) {
-      if (!polygonData.length) return segments;
-      const filtered = [];
-      for (let i = 0; i < segments.length; i += 1) {
-        const seg = segments[i];
-        const mid = { x: (seg.a.x + seg.b.x) / 2, y: (seg.a.y + seg.b.y) / 2 };
-        const idx = findPolygonIndex(mid, polygonData, points, tolerance);
-        if (idx === -1 || sharedPolygons.has(idx)) {
-          filtered.push(seg);
-        }
-      }
-      return filtered;
-    }
+    // 国タイプ判定と、その下ごしらえ（面の内外判定・共有する海・海岸線の内外）は logic.js にある
+    // （node --test で検査するため。現状.md 設計 4）。ここに写しを置かないこと。
+    // pointInPolygon / findPolygonIndex は今は index.html から呼んでいないが、選択まわりの処理から
+    // 使えるよう名前を残している（写しを書き足さないため）。
+    const {
+      GEOM_EPS,
+      pointInPolygon,
+      getPolygonRings,
+      buildPolygonData,
+      findPolygonIndex,
+      collectSharedSeaPolygons,
+      filterCoastSegments,
+      edgeKey,
+      collectBorderCoastPoints,
+      mapPointsToGraphIndices,
+      collectCoastInsidePolygons,
+      buildPolygonEdgeIndex,
+    } = DerleLogic;
 
     function readFile(file) {
       return new Promise((resolve, reject) => {
@@ -817,40 +644,24 @@
       return { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };
     }
 
-    function degToRad(deg) {
-      return (deg * Math.PI) / 180;
-    }
-
-    function normalizeVector(vec) {
-      const len = Math.hypot(vec.x, vec.y, vec.z);
-      if (!len) return { x: 1, y: 0, z: 0 };
-      return { x: vec.x / len, y: vec.y / len, z: vec.z / len };
-    }
-
-    function vectorToLonLat(vec) {
-      const norm = normalizeVector(vec);
-      return { lon: Math.atan2(norm.y, norm.x), lat: Math.asin(norm.z) };
-    }
-
-    function slerpVectors(a, b, t) {
-      const dot = Math.max(-1, Math.min(1, a.x * b.x + a.y * b.y + a.z * b.z));
-      const omega = Math.acos(dot);
-      if (omega < 1e-6) {
-        return normalizeVector({
-          x: a.x + (b.x - a.x) * t,
-          y: a.y + (b.y - a.y) * t,
-          z: a.z + (b.z - a.z) * t,
-        });
-      }
-      const sinOmega = Math.sin(omega);
-      const k0 = Math.sin((1 - t) * omega) / sinOmega;
-      const k1 = Math.sin(t * omega) / sinOmega;
-      return normalizeVector({
-        x: a.x * k0 + b.x * k1,
-        y: a.y * k0 + b.y * k1,
-        z: a.z * k0 + b.z * k1,
-      });
-    }
+    // 球面投影（正射図法・半球クリップ・地平線弧・経緯線）は logic.js にある
+    // （node --test で検査するため。現状.md 設計 4）。ここに写しを置かないこと。
+    const {
+      normalizeVector,
+      slerpVectors,
+      densifyMapSegment,
+      densifyMapRing,
+      buildRotation,
+      rotateVectorArrays,
+      intersectRotatedIndices,
+      getBackLonLat,
+      clipPolygonToHemisphere,
+      clipPolygonVectors,
+      formatCoord,
+      buildPathFromPoints,
+      buildSegmentPath,
+      buildGraticulePath,
+    } = DerleLogic;
 
     function getWikiSize() {
       if (!el.wikiSize) return 4800;
@@ -914,53 +725,10 @@
       return f ? Math.max(0.1, f.width * 1e-5) : 0.1;
     }
 
+    // 地図端の許容値（getSeamTolerance）を添えて logic.js の mapPointToVector を呼ぶ。
     function mapPointToVector(point, frame) {
       if (!point || !frame) return null;
-      const tol = getSeamTolerance(frame);
-      let lon = ((point.x - frame.x) / frame.width) * 360 - 180;
-      const side = DerleLogic.seamSideOf(point, frame, tol);
-      if (side === "W") lon = -180;
-      else if (side === "E") lon = 180;
-      const lat = Math.max(-90, Math.min(90, 90 - ((point.y - frame.y) / frame.height) * 180));
-      const lonRad = degToRad(lon);
-      const latRad = degToRad(lat);
-      const cosLat = Math.cos(latRad);
-      return {
-        x: cosLat * Math.cos(lonRad),
-        y: cosLat * Math.sin(lonRad),
-        z: Math.sin(latRad),
-      };
-    }
-
-    // 球面へ写す辺の長さの上限（経度・緯度の度）。地図上の直線は経緯度の直線なので、長い辺を
-    // 弦のまま球面へ写すと地図とずれる。地平線弧の回転角と真裏の点の内外判定（経緯度平面）が
-    // 食い違うと塗りが反転するため、球面へ写す前にこの長さ以下へ刻む。
-    const SPHERE_EDGE_MAX_DEG = 1;
-
-    // 地図座標の辺a→bを経緯度で SPHERE_EDGE_MAX_DEG 以下に刻む中間点（両端は含まない）。
-    function densifyMapSegment(a, b, vb) {
-      const spanDeg = Math.max(
-        (Math.abs(b.x - a.x) / vb.width) * 360,
-        (Math.abs(b.y - a.y) / vb.height) * 180,
-      );
-      const pieces = Math.ceil(spanDeg / SPHERE_EDGE_MAX_DEG);
-      const out = [];
-      for (let k = 1; k < pieces; k += 1) {
-        const t = k / pieces;
-        out.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
-      }
-      return out;
-    }
-
-    // 閉じた点列の各辺（最後→最初を含む）を densifyMapSegment で刻む。
-    function densifyMapRing(points, vb) {
-      const out = [];
-      for (let i = 0; i < points.length; i += 1) {
-        const a = points[i];
-        out.push(a);
-        densifyMapSegment(a, points[(i + 1) % points.length], vb).forEach((p) => out.push(p));
-      }
-      return out;
+      return DerleLogic.mapPointToVector(point, frame, getSeamTolerance(frame));
     }
 
     // 要素の点列化・座標変換・`d` のサブパス分割は logic.js のものを使う。ここに写しを置くと
@@ -1442,299 +1210,6 @@
       return { x: sx / len, y: sy / len, z: sz / len };
     }
 
-    function buildRotation(centerVec) {
-      const { lon, lat } = vectorToLonLat(centerVec);
-      return {
-        cosLon: Math.cos(lon),
-        sinLon: Math.sin(lon),
-        cosLat: Math.cos(lat),
-        sinLat: Math.sin(lat),
-      };
-    }
-
-    function rotateVector(vec, rotation) {
-      const x1 = rotation.cosLon * vec.x + rotation.sinLon * vec.y;
-      const y1 = -rotation.sinLon * vec.x + rotation.cosLon * vec.y;
-      const z1 = vec.z;
-      const x2 = rotation.sinLat * x1 - rotation.cosLat * z1;
-      const y2 = y1;
-      const z2 = rotation.cosLat * x1 + rotation.sinLat * z1;
-      return { x: x2, y: y2, z: z2 };
-    }
-
-    function projectRotated(vec) {
-      return { x: vec.y, y: vec.x };
-    }
-
-    function intersectRotatedIndices(aIdx, bIdx, rotX, rotY, rotZ) {
-      const zA = rotZ[aIdx];
-      const zB = rotZ[bIdx];
-      const denom = zA - zB;
-      if (Math.abs(denom) < 1e-9) return null;
-      const t = zA / denom;
-      const x = rotX[aIdx] + t * (rotX[bIdx] - rotX[aIdx]);
-      const y = rotY[aIdx] + t * (rotY[bIdx] - rotY[aIdx]);
-      const len = Math.hypot(x, y);
-      if (!len) return null;
-      const nx = x / len;
-      const ny = y / len;
-      return { x: ny, y: nx };
-    }
-
-    function intersectRotatedVectors(a, b) {
-      const denom = a.z - b.z;
-      if (Math.abs(denom) < 1e-9) return null;
-      const t = a.z / denom;
-      const x = a.x + t * (b.x - a.x);
-      const y = a.y + t * (b.y - a.y);
-      const len = Math.hypot(x, y);
-      if (!len) return null;
-      const nx = x / len;
-      const ny = y / len;
-      return { x: ny, y: nx };
-    }
-
-    function dedupePoints(points) {
-      const out = [];
-      const tol = 1e-6;
-      for (let i = 0; i < points.length; i += 1) {
-        const p = points[i];
-        if (!out.length) {
-          out.push(p);
-          continue;
-        }
-        const last = out[out.length - 1];
-        if (Math.abs(p.x - last.x) > tol || Math.abs(p.y - last.y) > tol) {
-          out.push(p);
-        }
-      }
-      if (out.length > 2) {
-        const first = out[0];
-        const last = out[out.length - 1];
-        if (Math.abs(first.x - last.x) < tol && Math.abs(first.y - last.y) < tol) {
-          out.pop();
-        }
-      }
-      return out;
-    }
-
-    // 地平線上をexitAngleからsweep（符号付き、πを超えてもよい）だけ回る弧の補間点を追加する（両端は含まない）。
-    function addHorizonArc(output, exitAngle, sweep) {
-      if (Math.abs(sweep) < 1e-6) return;
-      const steps = Math.max(2, Math.ceil(Math.abs(sweep) / (Math.PI / 36)));
-      for (let s = 1; s < steps; s += 1) {
-        const angle = exitAngle + sweep * (s / steps);
-        output.push({ x: Math.cos(angle), y: Math.sin(angle) });
-      }
-    }
-
-    // 不可視区間（出口→入口）を置き換える地平線弧を「短い方の弧の角度差diff + 2π×turns」の形で求める。
-    // 回転角は不可視区間の点列が視線軸まわりに回った角度に等しく、出口→入口の角度差に
-    // 基準半直線（回転後座標で y=0, x<0）を横切った符号付き回数crossTurns×2πを足して求める。
-    function buildHorizonArc(exitPt, entryPt, crossTurns) {
-      const exitAngle = Math.atan2(exitPt.y, exitPt.x);
-      let diff = Math.atan2(entryPt.y, entryPt.x) - exitAngle;
-      if (diff > Math.PI) diff -= 2 * Math.PI;
-      if (diff < -Math.PI) diff += 2 * Math.PI;
-      // 投影座標(x, y)=(回転後y, 回転後x)。基準半直線が分岐線になる角度 atan2(回転後y, 回転後x) で差を取り、投影座標の向きへ符号を戻す。
-      const sweep = -(Math.atan2(entryPt.x, entryPt.y) - Math.atan2(exitPt.x, exitPt.y) + 2 * Math.PI * crossTurns);
-      return { exitAngle, diff, turns: Math.round((sweep - diff) / (2 * Math.PI)) };
-    }
-
-    function horizonArcSweep(arc) {
-      return arc.diff + 2 * Math.PI * arc.turns;
-    }
-
-    // 視点中心の真裏の点の経緯度（ラジアン）。
-    function getBackLonLat(rotation) {
-      return {
-        lon: Math.atan2(-rotation.sinLon, -rotation.cosLon),
-        lat: -Math.atan2(rotation.sinLat, rotation.cosLat),
-      };
-    }
-
-    // 経緯度平面での点の内外判定（点から北へ伸ばした経線との交差回数）。
-    // 正距円筒図法の2D多角形と同じ内外になる（極や地図の上下端に接する多角形でも判定できる）。経度差は短い方で扱う。
-    function containsLonLat(indices, lonArr, latArr, lon, lat) {
-      let inside = false;
-      let prev = indices[indices.length - 1];
-      for (let i = 0; i < indices.length; i += 1) {
-        const curr = indices[i];
-        const a = normalizeAngle(lonArr[prev] - lon);
-        const b = a + normalizeAngle(lonArr[curr] - lonArr[prev]);
-        if ((a > 0) !== (b > 0)) {
-          const crossLat = latArr[prev] + (latArr[curr] - latArr[prev]) * (a / (a - b));
-          if (crossLat > lat) inside = !inside;
-        }
-        prev = curr;
-      }
-      return inside;
-    }
-
-    // 真裏の点Bの内外判定。2D地図から来た多角形は経緯度平面で閉じているので containsLonLat で判定する。
-    // 経度の巻き数が±1周の多角形（3Dで極を囲む輪。経緯度平面では閉じない）は、輪が分ける2領域のうち
-    // 面積の小さい方を内側とみなし、その側の極へ向かう経線とBからの交差回数で判定する。
-    function containsBackPoint(indices, lonArr, latArr, lon, lat) {
-      let winding = 0;
-      let capNorth = 0;
-      let prev = indices[indices.length - 1];
-      for (let i = 0; i < indices.length; i += 1) {
-        const curr = indices[i];
-        const dLon = normalizeAngle(lonArr[curr] - lonArr[prev]);
-        winding += dLon;
-        // 北極と辺の間の球面上の面積（符号付き）。
-        capNorth += dLon * (1 - Math.sin((latArr[prev] + latArr[curr]) / 2));
-        prev = curr;
-      }
-      if (Math.abs(winding) < Math.PI) {
-        return containsLonLat(indices, lonArr, latArr, lon, lat);
-      }
-      const northArea = Math.abs(capNorth);
-      const towardNorth = northArea <= 4 * Math.PI - northArea;
-      let crossings = 0;
-      prev = indices[indices.length - 1];
-      for (let i = 0; i < indices.length; i += 1) {
-        const curr = indices[i];
-        const a = normalizeAngle(lonArr[prev] - lon);
-        const b = a + normalizeAngle(lonArr[curr] - lonArr[prev]);
-        if ((a > 0) !== (b > 0)) {
-          const crossLat = latArr[prev] + (latArr[curr] - latArr[prev]) * (a / (a - b));
-          if (towardNorth ? crossLat > lat : crossLat < lat) crossings += 1;
-        }
-        prev = curr;
-      }
-      // 極側の領域の点は、極へ向かう経線が輪を偶数回横切る。
-      return crossings % 2 === 0;
-    }
-
-    function normalizeAngle(angle) {
-      if (angle > Math.PI) return angle - 2 * Math.PI;
-      if (angle <= -Math.PI) return angle + 2 * Math.PI;
-      return angle;
-    }
-
-    // 回転後座標で多角形を可視半球(z>=0)にクリップし、投影座標の点列を返す。
-    // 不可視区間は、その区間の点列が視線軸まわりに回った角度だけ地平線に沿って回る弧で置き換える
-    // （不可視区間が地平線の180°以上に回り込む場合も正しい向きになる）。
-    // さらに視点の真裏の点Bが多角形の内側にある場合は、弧の1本を逆回りにして内外を反転させる。
-    // lonArr/latArrは各点の経緯度（ラジアン）、backはBの経緯度。
-    function clipPolygonToHemisphere(indices, rotX, rotY, rotZ, projX, projY, lonArr, latArr, back) {
-      if (!indices.length) return [];
-      // 点と弧（{ arc }）を順に並べ、最後に弧を補間点へ展開する。
-      const items = [];
-      const arcs = [];
-      let lastExit = null;
-      let firstEntry = null;
-      let crossTurns = 0;
-      let leadCrossTurns = 0;
-      const pushArc = (exitPt, entryPt, turns) => {
-        const arc = buildHorizonArc(exitPt, entryPt, turns);
-        arcs.push(arc);
-        items.push({ arc });
-      };
-      let prev = indices[indices.length - 1];
-      let prevInside = rotZ[prev] >= 0;
-      for (let i = 0; i < indices.length; i += 1) {
-        const curr = indices[i];
-        const currInside = rotZ[curr] >= 0;
-        // 辺が不可視側で基準半直線（y=0, x<0）を横切った向き。
-        let crossTurn = 0;
-        if (!(prevInside && currInside) && (rotY[prev] > 0) !== (rotY[curr] > 0)) {
-          const t = rotY[prev] / (rotY[prev] - rotY[curr]);
-          const cx = rotX[prev] + t * (rotX[curr] - rotX[prev]);
-          const cz = rotZ[prev] + t * (rotZ[curr] - rotZ[prev]);
-          if (cx < 0 && cz < 0) crossTurn = rotY[prev] > 0 ? 1 : -1;
-        }
-        if (prevInside && currInside) {
-          items.push({ x: projX[curr], y: projY[curr] });
-        } else if (prevInside && !currInside) {
-          const hit = intersectRotatedIndices(prev, curr, rotX, rotY, rotZ);
-          if (hit) {
-            items.push(hit);
-            lastExit = hit;
-          }
-          crossTurns = crossTurn;
-        } else if (!prevInside && !currInside) {
-          crossTurns += crossTurn;
-        } else {
-          crossTurns += crossTurn;
-          const hit = intersectRotatedIndices(prev, curr, rotX, rotY, rotZ);
-          if (hit) {
-            if (lastExit) {
-              pushArc(lastExit, hit, crossTurns);
-              lastExit = null;
-            } else if (!firstEntry) {
-              firstEntry = hit;
-              leadCrossTurns = crossTurns;
-            }
-            items.push(hit);
-          }
-          items.push({ x: projX[curr], y: projY[curr] });
-          crossTurns = 0;
-        }
-        prev = curr;
-        prevInside = currInside;
-      }
-      if (lastExit && firstEntry) {
-        pushArc(lastExit, firstEntry, crossTurns + leadCrossTurns);
-      }
-      if (arcs.length && containsBackPoint(indices, lonArr, latArr, back.lon, back.lat)) {
-        // 弧の回転角の総和の符号は、見えている外側領域を囲む向きを表す。
-        // その向きの弧のうち最も長いものを逆回り（1周分戻す）にして、内外を入れ替える。
-        const sign = arcs.reduce((sum, arc) => sum + horizonArcSweep(arc), 0) >= 0 ? 1 : -1;
-        let target = null;
-        arcs.forEach((arc) => {
-          const sweep = horizonArcSweep(arc) * sign;
-          if (sweep > 0 && (!target || sweep > horizonArcSweep(target) * sign)) target = arc;
-        });
-        if (target) target.turns -= sign;
-      }
-      const output = [];
-      items.forEach((item) => {
-        if (item.arc) {
-          addHorizonArc(output, item.arc.exitAngle, horizonArcSweep(item.arc));
-        } else {
-          output.push(item);
-        }
-      });
-      return dedupePoints(output);
-    }
-
-    function clipPolygonVectors(vectors, rotation) {
-      if (!vectors.length) return [];
-      const count = vectors.length;
-      const indices = new Array(count);
-      const rotX = new Float64Array(count);
-      const rotY = new Float64Array(count);
-      const rotZ = new Float64Array(count);
-      const lonArr = new Float64Array(count);
-      const latArr = new Float64Array(count);
-      for (let i = 0; i < count; i += 1) {
-        const v = vectors[i];
-        const r = rotateVector(v, rotation);
-        indices[i] = i;
-        rotX[i] = r.x;
-        rotY[i] = r.y;
-        rotZ[i] = r.z;
-        lonArr[i] = Math.atan2(v.y, v.x);
-        latArr[i] = Math.atan2(v.z, Math.hypot(v.x, v.y));
-      }
-      return clipPolygonToHemisphere(indices, rotX, rotY, rotZ, rotY, rotX, lonArr, latArr, getBackLonLat(rotation));
-    }
-
-    function formatCoord(value) {
-      return value.toFixed(5);
-    }
-
-    function buildPathFromPoints(points) {
-      if (points.length < 3) return "";
-      let d = `M${formatCoord(points[0].x)} ${formatCoord(points[0].y)}`;
-      for (let i = 1; i < points.length; i += 1) {
-        d += ` L${formatCoord(points[i].x)} ${formatCoord(points[i].y)}`;
-      }
-      return `${d} Z`;
-    }
-
     function buildEdgePath(edges, predicate, rotX, rotY, rotZ, projX, projY) {
       const parts = [];
       const edgeChains = state.wikiOutput.edgeChains;
@@ -1765,36 +1240,6 @@
       return parts.join(" ");
     }
 
-    function buildSegmentPath(segments, rotation) {
-      const parts = [];
-      for (let i = 0; i < segments.length; i += 1) {
-        const seg = segments[i];
-        if (!seg || !seg.a || !seg.b) continue;
-        const a = rotateVector(seg.a, rotation);
-        const b = rotateVector(seg.b, rotation);
-        const zA = a.z;
-        const zB = b.z;
-        if (zA >= 0 && zB >= 0) {
-          const pa = projectRotated(a);
-          const pb = projectRotated(b);
-          parts.push(`M${formatCoord(pa.x)} ${formatCoord(pa.y)} L${formatCoord(pb.x)} ${formatCoord(pb.y)}`);
-          continue;
-        }
-        if (zA >= 0 || zB >= 0) {
-          const hit = intersectRotatedVectors(a, b);
-          if (!hit) continue;
-          if (zA >= 0) {
-            const pa = projectRotated(a);
-            parts.push(`M${formatCoord(pa.x)} ${formatCoord(pa.y)} L${formatCoord(hit.x)} ${formatCoord(hit.y)}`);
-          } else {
-            const pb = projectRotated(b);
-            parts.push(`M${formatCoord(hit.x)} ${formatCoord(hit.y)} L${formatCoord(pb.x)} ${formatCoord(pb.y)}`);
-          }
-        }
-      }
-      return parts.join(" ");
-    }
-
     function buildLandPaths(rotation) {
       const vectorPaths = state.wikiOutput.landVectorPaths || [];
       const parts = [];
@@ -1807,115 +1252,14 @@
       return parts;
     }
 
-    function buildGraticulePath(rotation) {
-      const parts = [];
-      const step = 30;
-      const sample = 3;
-      for (let lon = -180; lon <= 180; lon += step) {
-        const line = [];
-        for (let lat = -90; lat <= 90; lat += sample) {
-          const lonRad = degToRad(lon);
-          const latRad = degToRad(lat);
-          const cosLat = Math.cos(latRad);
-          const vec = {
-            x: cosLat * Math.cos(lonRad),
-            y: cosLat * Math.sin(lonRad),
-            z: Math.sin(latRad),
-          };
-          line.push(rotateVector(vec, rotation));
-        }
-        parts.push(buildVisiblePolyline(line));
-      }
-      for (let lat = -60; lat <= 60; lat += step) {
-        const line = [];
-        for (let lon = -180; lon <= 180; lon += sample) {
-          const lonRad = degToRad(lon);
-          const latRad = degToRad(lat);
-          const cosLat = Math.cos(latRad);
-          const vec = {
-            x: cosLat * Math.cos(lonRad),
-            y: cosLat * Math.sin(lonRad),
-            z: Math.sin(latRad),
-          };
-          line.push(rotateVector(vec, rotation));
-        }
-        parts.push(buildVisiblePolyline(line));
-      }
-      return parts.filter(Boolean).join(" ");
-    }
-
-    function buildVisiblePolyline(rotatedPoints) {
-      if (!rotatedPoints.length) return "";
-      let d = "";
-      let active = false;
-      let prev = rotatedPoints[0];
-      for (let i = 1; i < rotatedPoints.length; i += 1) {
-        const curr = rotatedPoints[i];
-        const prevInside = prev.z >= 0;
-        const currInside = curr.z >= 0;
-        if (prevInside && currInside) {
-          const pp = projectRotated(prev);
-          const pc = projectRotated(curr);
-          if (!active) {
-            d += `M${formatCoord(pp.x)} ${formatCoord(pp.y)}`;
-            active = true;
-          }
-          d += ` L${formatCoord(pc.x)} ${formatCoord(pc.y)}`;
-        } else if (prevInside && !currInside) {
-          const hit = intersectRotatedVectors(prev, curr);
-          if (hit) {
-            const pp = projectRotated(prev);
-            if (!active) {
-              d += `M${formatCoord(pp.x)} ${formatCoord(pp.y)}`;
-            }
-            d += ` L${formatCoord(hit.x)} ${formatCoord(hit.y)}`;
-          }
-          active = false;
-        } else if (!prevInside && currInside) {
-          const hit = intersectRotatedVectors(prev, curr);
-          if (hit) {
-            const pc = projectRotated(curr);
-            d += `M${formatCoord(hit.x)} ${formatCoord(hit.y)} L${formatCoord(pc.x)} ${formatCoord(pc.y)}`;
-            active = true;
-          }
-        } else {
-          active = false;
-        }
-        prev = curr;
-      }
-      return d;
-    }
-
     function buildWikipediaSvgMarkup(centerVec) {
       if (!state.graph || !state.polygons.length || !state.wikiOutput.pointVectors) return "";
       const rotation = buildRotation(centerVec);
-      const pointVectors = state.wikiOutput.pointVectors;
-      const count = pointVectors.length;
-      const rotX = new Float64Array(count);
-      const rotY = new Float64Array(count);
-      const rotZ = new Float64Array(count);
-      const projX = new Float64Array(count);
-      const projY = new Float64Array(count);
-      const lonArr = new Float64Array(count);
-      const latArr = new Float64Array(count);
+      const { rotX, rotY, rotZ, projX, projY, lonArr, latArr } = rotateVectorArrays(
+        state.wikiOutput.pointVectors,
+        rotation,
+      );
       const back = getBackLonLat(rotation);
-
-      for (let i = 0; i < count; i += 1) {
-        const v = pointVectors[i];
-        lonArr[i] = Math.atan2(v.y, v.x);
-        latArr[i] = Math.atan2(v.z, Math.hypot(v.x, v.y));
-        const x1 = rotation.cosLon * v.x + rotation.sinLon * v.y;
-        const y1 = -rotation.sinLon * v.x + rotation.cosLon * v.y;
-        const z1 = v.z;
-        const x2 = rotation.sinLat * x1 - rotation.cosLat * z1;
-        const y2 = y1;
-        const z2 = rotation.cosLat * x1 + rotation.sinLat * z1;
-        rotX[i] = x2;
-        rotY[i] = y2;
-        rotZ[i] = z2;
-        projX[i] = y2;
-        projY[i] = x2;
-      }
 
       const allPolygonPaths = [];
       const selectedPolygonPaths = [];
@@ -2147,177 +1491,6 @@
       img.src = url;
     }
 
-    function edgeKey(a, b) {
-      return a < b ? `${a}-${b}` : `${b}-${a}`;
-    }
-
-    function buildPointLookup(points, snap) {
-      const cellSize = snap > 0 ? snap : GEOM_EPS;
-      const grid = new Map();
-
-      function gridKey(x, y) {
-        return `${x}:${y}`;
-      }
-
-      points.forEach((pt, idx) => {
-        const cx = Math.floor(pt.x / cellSize);
-        const cy = Math.floor(pt.y / cellSize);
-        const key = gridKey(cx, cy);
-        if (!grid.has(key)) grid.set(key, []);
-        grid.get(key).push(idx);
-      });
-
-      function findNearestIndex(pt) {
-        const maxDist = snap > 0 ? snap : GEOM_EPS;
-        const maxDist2 = maxDist * maxDist;
-        const cx = Math.floor(pt.x / cellSize);
-        const cy = Math.floor(pt.y / cellSize);
-        let bestIdx = null;
-        let bestDist2 = Infinity;
-
-        for (let dx = -1; dx <= 1; dx += 1) {
-          for (let dy = -1; dy <= 1; dy += 1) {
-            const key = gridKey(cx + dx, cy + dy);
-            const candidates = grid.get(key);
-            if (!candidates) continue;
-            for (let i = 0; i < candidates.length; i += 1) {
-              const idx = candidates[i];
-              const d2 = distanceSq(pt, points[idx]);
-              if (d2 <= maxDist2 && d2 < bestDist2) {
-                bestDist2 = d2;
-                bestIdx = idx;
-              }
-            }
-          }
-        }
-
-        return bestIdx;
-      }
-
-      return { findNearestIndex };
-    }
-
-    function collectBorderCoastPoints(segments, snap) {
-      const points = [];
-      const flags = [];
-      if (!segments || segments.length === 0) return points;
-
-      const cellSize = snap > 0 ? snap : GEOM_EPS;
-      const maxDist = snap > 0 ? snap : GEOM_EPS;
-      const maxDist2 = maxDist * maxDist;
-      const grid = new Map();
-
-      function gridKey(x, y) {
-        return `${x}:${y}`;
-      }
-
-      function addPoint(pt, flag) {
-        const cx = Math.floor(pt.x / cellSize);
-        const cy = Math.floor(pt.y / cellSize);
-        let bestIdx = null;
-        let bestDist2 = Infinity;
-
-        for (let dx = -1; dx <= 1; dx += 1) {
-          for (let dy = -1; dy <= 1; dy += 1) {
-            const key = gridKey(cx + dx, cy + dy);
-            const candidates = grid.get(key);
-            if (!candidates) continue;
-            for (let i = 0; i < candidates.length; i += 1) {
-              const idx = candidates[i];
-              const d2 = distanceSq(pt, points[idx]);
-              if (d2 <= maxDist2 && d2 < bestDist2) {
-                bestDist2 = d2;
-                bestIdx = idx;
-              }
-            }
-          }
-        }
-
-        if (bestIdx === null) {
-          const idx = points.length;
-          points.push({ x: pt.x, y: pt.y });
-          flags.push(flag);
-          const key = gridKey(cx, cy);
-          if (!grid.has(key)) grid.set(key, []);
-          grid.get(key).push(idx);
-          return;
-        }
-
-        flags[bestIdx] |= flag;
-      }
-
-      for (let i = 0; i < segments.length; i += 1) {
-        const seg = segments[i];
-        const flag = seg.source === "border" ? 1 : seg.source === "coast" ? 2 : 0;
-        if (!flag) continue;
-        addPoint(seg.a, flag);
-        addPoint(seg.b, flag);
-      }
-
-      const borderCoastPoints = [];
-      for (let i = 0; i < points.length; i += 1) {
-        if ((flags[i] & 1) && (flags[i] & 2)) {
-          borderCoastPoints.push(points[i]);
-        }
-      }
-
-      return borderCoastPoints;
-    }
-
-    function mapPointsToGraphIndices(points, graphPoints, snap) {
-      const indices = new Set();
-      if (!points || points.length === 0) return indices;
-      const lookup = buildPointLookup(graphPoints, snap);
-      points.forEach((pt) => {
-        const idx = lookup.findNearestIndex(pt);
-        if (idx !== null && idx !== undefined) {
-          indices.add(idx);
-        }
-      });
-      return indices;
-    }
-
-    function collectCoastInsidePolygons(coastSegments, polygonData, points, tolerance) {
-      const inside = new Set();
-      if (!coastSegments || coastSegments.length === 0 || polygonData.length === 0) return inside;
-
-      for (let i = 0; i < coastSegments.length; i += 1) {
-        if (inside.size === polygonData.length) break;
-        const seg = coastSegments[i];
-        const mid = { x: (seg.a.x + seg.b.x) / 2, y: (seg.a.y + seg.b.y) / 2 };
-        const idx = findPolygonIndex(mid, polygonData, points, tolerance);
-        if (idx >= 0) inside.add(idx);
-      }
-
-      return inside;
-    }
-
-    function buildPolygonEdgeIndex(polygons, graph) {
-      if (!graph) return null;
-      const edgeSources = new Map();
-      graph.edges.forEach((edge) => {
-        edgeSources.set(edgeKey(edge.a, edge.b), edge.sources);
-      });
-
-      const edgeToPolys = new Map();
-      polygons.forEach((poly) => {
-        const polyId = String(poly.id);
-        getPolygonRings(poly).forEach((pts) => {
-          for (let i = 0; i < pts.length; i += 1) {
-            const a = pts[i];
-            const b = pts[(i + 1) % pts.length];
-            const key = edgeKey(a, b);
-            if (!edgeToPolys.has(key)) {
-              edgeToPolys.set(key, { a, b, polys: new Set() });
-            }
-            edgeToPolys.get(key).polys.add(polyId);
-          }
-        });
-      });
-
-      return { edgeSources, edgeToPolys };
-    }
-
     // 地図端上の人工的な切断線・枠の仮想辺か（国タイプ判定では境界として数えない）。
     function isSeamCutEdge(aIdx, bIdx, sources) {
       if (sources && sources.has("frame") && sources.size === 1) return true;
@@ -2332,67 +1505,9 @@
       );
     }
 
+    // 国タイプ判定は logic.js。地図端の切断線・枠の仮想辺を数えない判定（isSeamCutEdge）だけここから渡す。
     function classifyPolygons(polygons, graph, edgeSources, sharedSeaInfo, coastInfo) {
-      const types = new Map();
-      const borderCoastPoints = coastInfo && coastInfo.borderCoastPoints;
-      const coastInsidePolygons = coastInfo && coastInfo.coastInsidePolygons;
-      const coastDataAvailable = !!(borderCoastPoints && coastInsidePolygons);
-      polygons.forEach((poly, polyIndex) => {
-        const polyId = String(poly.id);
-        let hasBorder = false;
-        let hasCoast = false;
-        let touchesSharedSea = false;
-        let touchesCoast = false;
-
-        // 継ぎ目をまたぐ地物は全ピースの辺をまとめて1つの地物として判定する。
-        const edgesOfPoly = [];
-        getPolygonRings(poly).forEach((ring) => {
-          for (let i = 0; i < ring.length; i += 1) edgesOfPoly.push([ring[i], ring[(i + 1) % ring.length]]);
-        });
-        for (let i = 0; i < edgesOfPoly.length; i += 1) {
-          const [aIdx, bIdx] = edgesOfPoly[i];
-          const edge = edgeKey(aIdx, bIdx);
-          if (!touchesCoast && borderCoastPoints && (borderCoastPoints.has(aIdx) || borderCoastPoints.has(bIdx))) {
-            touchesCoast = true;
-          }
-          const sources = edgeSources.get(edge);
-          if (!sources) continue;
-          if (isSeamCutEdge(aIdx, bIdx, sources)) continue;
-          if (sources.has("border")) hasBorder = true;
-          if (sources.has("coast")) {
-            hasCoast = true;
-            if (!touchesSharedSea && sharedSeaInfo && sharedSeaInfo.polygonData.length) {
-              const a = graph.points[aIdx];
-              const b = graph.points[bIdx];
-              const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-              const idx = findPolygonIndex(mid, sharedSeaInfo.polygonData, sharedSeaInfo.points, sharedSeaInfo.tolerance);
-              if (idx >= 0 && sharedSeaInfo.sharedPolygons.has(idx)) {
-                touchesSharedSea = true;
-              }
-            }
-          }
-        }
-
-        let type = "不明";
-        if (hasBorder && hasCoast) {
-          type = touchesSharedSea ? "共有する海" : "海岸線まで国境界";
-        } else if (hasBorder) {
-          if (!coastDataAvailable) {
-            type = "海まで国境線";
-          } else if (touchesCoast) {
-            type = "海まで国境線";
-          } else if (coastInsidePolygons.has(polyIndex)) {
-            type = "完全島国";
-          } else {
-            type = "内陸国";
-          }
-        } else if (hasCoast) {
-          type = "島国";
-        }
-        types.set(polyId, type);
-      });
-
-      return types;
+      return DerleLogic.classifyPolygons(polygons, graph, edgeSources, sharedSeaInfo, coastInfo, isSeamCutEdge);
     }
 
     function updatePolygonStrokes() {
