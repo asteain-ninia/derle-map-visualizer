@@ -2945,6 +2945,98 @@
     }
     return d;
   }
+  // --- 矩形選択（ドラッグで囲んだ面をまとめて選ぶ。要件定義書 §6.7） ---------------
+  //
+  // 判定は「面が矩形の内側に完全に収まっているか」。矩形は凸なので、リングの全頂点が
+  // 矩形内にあることと、リングの外接矩形が矩形内にあることは同値になる。だから面ごとの
+  // 外接矩形を 1 度だけ求めておけば、ドラッグ中の判定は外接矩形の比較だけで済む。
+  // 「触れたら選ぶ」にしないのは、島を囲むと周りの海の面や、少しかすめた大陸の国まで
+  // 拾ってしまうため（細かい島々をまとめて選ぶ、という用途に合わない）。
+
+  /** 2 隅から正規化した矩形 { minX, minY, maxX, maxY } を作る（どちら向きに引いても同じ）。 */
+  function rectFromCorners(a, b) {
+    return {
+      minX: Math.min(a.x, b.x),
+      minY: Math.min(a.y, b.y),
+      maxX: Math.max(a.x, b.x),
+      maxY: Math.max(a.y, b.y),
+    };
+  }
+
+  /** 外接矩形 bounds が矩形 rect の内側（境界上を含む）に収まるか。 */
+  function boundsInsideRect(bounds, rect) {
+    return bounds.minX >= rect.minX && bounds.maxX <= rect.maxX
+      && bounds.minY >= rect.minY && bounds.maxY <= rect.maxY;
+  }
+
+  /** リング（頂点番号の列）が矩形の内側に完全に収まるか。 */
+  function ringInsideRect(ringIndices, points, rect) {
+    if (!ringIndices || ringIndices.length === 0) return false;
+    return boundsInsideRect(ringBounds(ringIndices, points), rect);
+  }
+
+  /**
+   * 矩形選択の索引を作る。features は [{ id, rings: [頂点番号の列, ...] }]
+   * （rings が無ければ points を 1 本のリングとみなす）。戻り値は [{ id, bounds: [各リングの外接矩形] }]。
+   * 経度180度の継ぎ目でつないだ地物は複数のリングを持つ。
+   */
+  function buildRectSelectionIndex(features, points) {
+    return features.map((feature) => {
+      const rings = feature.rings || [feature.points];
+      return {
+        id: String(feature.id),
+        bounds: rings.filter((ring) => ring && ring.length).map((ring) => ringBounds(ring, points)),
+      };
+    });
+  }
+
+  /**
+   * 矩形に収まる地物の id を返す（索引の並び順）。地物のピースのどれか 1 つが収まれば選ぶ。
+   * 継ぎ目でつないだ地物はどちらのピースをクリックしても同じ地物が選ばれるので、それに合わせる。
+   */
+  function collectRectSelectionHits(index, rect) {
+    const hits = [];
+    for (let i = 0; i < index.length; i += 1) {
+      const entry = index[i];
+      if (entry.bounds.some((b) => boundsInsideRect(b, rect))) hits.push(entry.id);
+    }
+    return hits;
+  }
+
+  /**
+   * 修飾キーから矩形選択のモードを決める。
+   * Alt / Ctrl / ⌘ → "remove"（囲んだ面を選択から外す）、Shift → "add"（追加）、なし → "replace"（置き換え）。
+   * Alt と Shift を同時に押したときは外す側を優先する（誤って広げるより安全）。
+   */
+  function rectSelectionMode(modifiers) {
+    const m = modifiers || {};
+    if (m.altKey || m.ctrlKey || m.metaKey) return "remove";
+    if (m.shiftKey) return "add";
+    return "replace";
+  }
+
+  /**
+   * 矩形選択を選択集合に適用した結果を新しい Set で返す（current は変更しない）。
+   * replace: 囲んだ面だけにする（何も囲まなければ空。空白クリックで解除するのと同じ）。
+   * add: 囲んだ面を足す（Shift+クリックと違ってトグルしない。混ざった範囲を囲んでも全部選ばれる）。
+   * remove: 囲んだ面を外す。
+   */
+  function applyRectSelection(current, hits, mode) {
+    if (mode === "replace") return new Set(hits);
+    const next = new Set(current);
+    if (mode === "add") {
+      hits.forEach((id) => next.add(id));
+    } else if (mode === "remove") {
+      hits.forEach((id) => next.delete(id));
+    }
+    return next;
+  }
+
+  /** ポインタが押した位置から threshold（画面 px）を超えて動いたか。これ以下はクリックとして扱う。 */
+  function exceedsDragThreshold(start, current, threshold) {
+    return Math.hypot(current.x - start.x, current.y - start.y) > threshold;
+  }
+
   global.DerleLogic = {
     setMeasureSvg,
     nextFrame,
@@ -2953,6 +3045,15 @@
     buildGraphFromSegments,
     bridgeOpenBorderGaps,
     extractPolygonsFromGraph,
+    // 矩形選択（index.html の地図上のドラッグが使う）
+    rectFromCorners,
+    boundsInsideRect,
+    ringInsideRect,
+    buildRectSelectionIndex,
+    collectRectSelectionHits,
+    rectSelectionMode,
+    applyRectSelection,
+    exceedsDragThreshold,
     // 点列化の方式切替と、新旧の突き合わせに使う下位関数（logic_test.html が使う）
     setSampleMode,
     getSampleMode,
