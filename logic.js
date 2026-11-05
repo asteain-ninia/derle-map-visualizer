@@ -1688,6 +1688,194 @@
     return { parents, owners };
   }
 
+  // --- 面の穴（内包された面を外側の面から切り抜く。要件定義書 §6.7 / §6.11） -----------
+  //
+  // `.gimoza` の書き出し（gimoza.js buildManifest）と画面表示（index.html）が同じ判定で
+  // 穴を決めるための部品。以前は gimoza.js にだけあり、画面は外側の面を穴なしで塗っていた
+  // （現状.md 重要度低 1「包領を画面上で排他にできていない」）。
+
+  /**
+   * リングの頂点列を整える: 閉じの重複頂点と連続する重複頂点を落とす。
+   * 異なる頂点が 3 つ未満なら null（面にならない）。
+   */
+  function cleanRing(indices) {
+    let r = indices.slice();
+    if (r.length >= 2 && r[0] === r[r.length - 1]) r = r.slice(0, -1);
+    const out = [];
+    for (const i of r) {
+      if (out.length === 0 || out[out.length - 1] !== i) out.push(i);
+    }
+    while (out.length >= 2 && out[0] === out[out.length - 1]) out.pop();
+    return new Set(out).size >= 3 ? out : null;
+  }
+
+  /**
+   * リングの分解。
+   *
+   * 面抽出の一筆書きは「橋渡し辺を往復して島を除外する」自己接触リング (スリット付き)
+   * を生むことがある。同一頂点の再訪で閉じる部分ループを検出し、
+   *   - 面積 ≈ 0 (往復スパー) → 除去
+   *   - 外周と逆回り (ポケット = 島などの除外領域) → 明示的な穴リングに分解
+   *   - 外周と同回り (頂点接触のローブ) → そのまま残す
+   */
+  function decomposeRing(indices, points) {
+    const outerSign = Math.sign(polygonArea(indices, points));
+    let out = [];
+    const pockets = [];
+    let posOf = new Map();
+    for (const v of indices) {
+      if (posOf.has(v)) {
+        const s = posOf.get(v);
+        const loop = out.slice(s);
+        const area = polygonArea(loop, points);
+        if (Math.abs(area) < 1e-9 || new Set(loop).size < 3) {
+          // 往復スパー: 捨てる (v の最初の出現だけ残す)
+          out = out.slice(0, s + 1);
+          posOf = new Map(out.map((u, k) => [u, k]));
+          continue;
+        }
+        if (Math.sign(area) !== outerSign) {
+          // ポケット: 穴リングとして分解
+          pockets.push(loop);
+          out = out.slice(0, s + 1);
+          posOf = new Map(out.map((u, k) => [u, k]));
+          continue;
+        }
+        // 同回りのローブ: 残す (頂点重複を許容)
+      }
+      posOf.set(v, out.length);
+      out.push(v);
+    }
+    return { outer: out, pockets };
+  }
+
+  /**
+   * 抽出した面のリング（頂点 index 列）を、外周と穴（ポケット）に整える。
+   * 戻り値 { rawRing, outer, ring, pockets, pocketCount }:
+   *   rawRing     … cleanRing した元のリング（退化していれば null で、以降も null / 空）
+   *   outer       … ポケットとスパーを外した外周（cleanRing 前）
+   *   ring        … outer を cleanRing したもの（分解後に退化していれば null）
+   *   pockets     … ポケット（cleanRing 済み、退化したものは除く）
+   *   pocketCount … 分解で見つかったポケットの数（退化したものも数える。ログ用）
+   */
+  function normalizeFaceRing(indices, points) {
+    const rawRing = cleanRing(indices);
+    if (rawRing === null) return { rawRing: null, outer: null, ring: null, pockets: [], pocketCount: 0 };
+    const { outer, pockets } = decomposeRing(rawRing, points);
+    return {
+      rawRing,
+      outer,
+      ring: cleanRing(outer),
+      pockets: pockets.map((l) => cleanRing(l)).filter((l) => l !== null),
+      pocketCount: pockets.length,
+    };
+  }
+
+  /**
+   * 内包の親（computeContainment の結果）から、各面に開ける穴を決める。
+   *
+   *   faces   … [{ ring, pockets }]（normalizeFaceRing の ring / pockets）
+   *   parents … 面 index → 直接内包する面の index（-1 は無し）
+   *
+   * 戻り値は 面 index → 穴にする子の面 index の配列（index の昇順）。面 i を直接の親とする
+   * 面は i の穴になる。ただし i のポケットが既にその領域を覆っている（島全体のポケットと、
+   * その島を分割した面など）ときは二重に開けない。穴の形は子の外周（ring）そのもので、
+   * 子が自分の中に持つ穴（穴の中の飛び地）は親の側では扱わない（子の側の穴になる）。
+   */
+  function assignContainedHoles(faces, parents, points) {
+    const holes = faces.map(() => []);
+    for (let i = 0; i < faces.length; i += 1) {
+      const pockets = faces[i].pockets || [];
+      for (let j = 0; j < faces.length; j += 1) {
+        if (parents[j] !== i) continue;
+        const jRing = faces[j].ring;
+        let covered = false;
+        for (const loop of pockets) {
+          const loopSet = new Set(loop);
+          const samples = jRing.filter((v) => !loopSet.has(v)).slice(0, 9);
+          if (samples.length === 0) {
+            covered = true;
+            break;
+          }
+          let inCount = 0;
+          for (const v of samples) {
+            if (pointInRingIndices(points[v].x, points[v].y, loop, points)) inCount += 1;
+          }
+          if (inCount * 2 > samples.length) {
+            covered = true;
+            break;
+          }
+        }
+        if (!covered) holes[i].push(j);
+      }
+    }
+    return holes;
+  }
+
+  /**
+   * 画面表示用: 抽出した面（[{ points, area }]、平面上のピース）ごとの穴を求める。
+   * `.gimoza` の書き出しと同じ手順（normalizeFaceRing → computeContainment → assignContainedHoles）。
+   * 書き出しは間引きのあとのリングでもう一度求めるが、判定の部品は同じもの。
+   *
+   * 戻り値 { holes, holeRings, parents }:
+   *   holes     … 面 index → 穴にする子の面 index の配列
+   *   holeRings … 面 index → 穴のリング（子の外周の頂点 index 列）の配列
+   *   parents   … 面 index → 直接内包する面の index（-1 は無し。退化した面も -1）
+   */
+  function computeFaceHoles(faces, points) {
+    const normalized = faces.map((face) => normalizeFaceRing(face.points, points));
+    // 退化した面は書き出しと同じく包含の判定から外す（index は詰めて求め、元へ戻す）
+    const valid = [];
+    normalized.forEach((n, i) => {
+      if (n.ring !== null) valid.push(i);
+    });
+    const compact = valid.map((i) => normalized[i]);
+    const compactParents = computeContainment(
+      valid.map((i) => ({ points: normalized[i].ring, area: Math.abs(faces[i].area) })),
+      points,
+    );
+    const compactHoles = assignContainedHoles(compact, compactParents, points);
+    const parents = faces.map(() => -1);
+    const holes = faces.map(() => []);
+    valid.forEach((orig, k) => {
+      parents[orig] = compactParents[k] === -1 ? -1 : valid[compactParents[k]];
+      holes[orig] = compactHoles[k].map((c) => valid[c]);
+    });
+    const holeRings = holes.map((list) => list.map((j) => normalized[j].ring));
+    return { holes, holeRings, parents };
+  }
+
+  /**
+   * 画面表示用: 地物ごとの穴（computeFaceHoles をピースから地物へ持ち上げたもの）。
+   *
+   *   pieces … [{ featureId, points, area }]（index.html の state.polygonPieces）
+   *
+   * 戻り値は 地物 id → [{ ring, childId, area }] の Map（穴が無い地物は入らない）。
+   *   ring    … 穴のリング。外側のピースの外周と逆回りにしてあるので、外周と同じ path に
+   *             足して既定の nonzero で塗れば穴になる（evenodd でも同じ）
+   *   childId … 穴になった（内包された）地物の id
+   *   area    … 穴のリングの面積（絶対値）
+   * 経度180度の継ぎ目で同じ地物になったピースどうしは穴にしない。
+   */
+  function computeFeatureHoles(pieces, points) {
+    const { holes, holeRings } = computeFaceHoles(pieces, points);
+    const out = new Map();
+    pieces.forEach((piece, i) => {
+      if (!holes[i].length) return;
+      const outerSign = Math.sign(polygonArea(piece.points, points));
+      holes[i].forEach((j, k) => {
+        const childId = pieces[j].featureId;
+        if (childId === piece.featureId) return;
+        let ring = holeRings[i][k];
+        const area = polygonArea(ring, points);
+        if (Math.sign(area) === outerSign) ring = ring.slice().reverse();
+        if (!out.has(piece.featureId)) out.set(piece.featureId, []);
+        out.get(piece.featureId).push({ ring, childId, area: Math.abs(area) });
+      });
+    });
+    return out;
+  }
+
   // ---- 経度180度の継ぎ目（地図の西端・東端）----
   // frame: 正距円筒図法で経度-180〜+180・緯度+90〜-90に対応する矩形 {x, y, width, height}
 
@@ -3068,6 +3256,13 @@
     computeOwnership,
     computeContainment,
     OWNING_TYPES,
+    // 面の穴（内包された面の切り抜き。画面表示と .gimoza の書き出しが共有する）
+    cleanRing,
+    decomposeRing,
+    normalizeFaceRing,
+    assignContainedHoles,
+    computeFaceHoles,
+    computeFeatureHoles,
     // 経度180度の継ぎ目（地図の西端・東端）
     seamSideOf,
     seamEdgeSide,
