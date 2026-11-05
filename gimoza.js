@@ -213,15 +213,9 @@
 
   // --- 1. リングの整形 -------------------------------------------------------
   // 閉包重複 (先頭=末尾) と連続重複を除去し、3 頂点未満は捨てる。
+  // 本体は logic.js（画面表示の穴も同じ整形を使うので一本化した）。
   function cleanRing(indices) {
-    let r = indices.slice();
-    if (r.length >= 2 && r[0] === r[r.length - 1]) r = r.slice(0, -1);
-    const out = [];
-    for (const i of r) {
-      if (out.length === 0 || out[out.length - 1] !== i) out.push(i);
-    }
-    while (out.length >= 2 && out[0] === out[out.length - 1]) out.pop();
-    return new Set(out).size >= 3 ? out : null;
+    return logic().cleanRing(indices);
   }
 
   /**
@@ -241,43 +235,11 @@
   }
 
   /**
-   * リングの正規化。
-   *
-   * 面抽出の一筆書きは「橋渡し辺を往復して島を除外する」自己接触リング (スリット付き)
-   * を生むことがある。同一頂点の再訪で閉じる部分ループを検出し、
-   *   - 面積 ≈ 0 (往復スパー) → 除去
-   *   - 外周と逆回り (ポケット = 島などの除外領域) → 明示的な穴リングに分解
-   *   - 外周と同回り (頂点接触のローブ) → そのまま残す
+   * リングの正規化（スパー除去とポケットの分解）。本体は logic.js の decomposeRing。
+   * 画面表示の穴も同じ分解を使うので一本化した。
    */
   function decomposeRing(indices, points) {
-    const outerSign = Math.sign(ringSignedArea(indices, points));
-    let out = [];
-    const pockets = [];
-    let posOf = new Map();
-    for (const v of indices) {
-      if (posOf.has(v)) {
-        const s = posOf.get(v);
-        const loop = out.slice(s);
-        const area = ringSignedArea(loop, points);
-        if (Math.abs(area) < 1e-9 || new Set(loop).size < 3) {
-          // 往復スパー: 捨てる (v の最初の出現だけ残す)
-          out = out.slice(0, s + 1);
-          posOf = new Map(out.map((u, k) => [u, k]));
-          continue;
-        }
-        if (Math.sign(area) !== outerSign) {
-          // ポケット: 穴リングとして分解
-          pockets.push(loop);
-          out = out.slice(0, s + 1);
-          posOf = new Map(out.map((u, k) => [u, k]));
-          continue;
-        }
-        // 同回りのローブ: 残す (頂点重複を許容)
-      }
-      posOf.set(v, out.length);
-      out.push(v);
-    }
-    return { outer: out, pockets };
+    return logic().decomposeRing(indices, points);
   }
 
   /**
@@ -293,25 +255,24 @@
     let spurTrimmed = 0;
     for (let i = 0; i < rawPolygons.length; i += 1) {
       const p = rawPolygons[i];
-      const ring = cleanRing(p.points);
-      if (ring === null) {
+      // 整形と分解は logic.js の normalizeFaceRing（画面表示の穴も同じものを使う）
+      const n = logic().normalizeFaceRing(p.points, points);
+      if (n.rawRing === null) {
         log(`退化した面を除外: id=${p.id} (${p.points.length} 点)`);
         continue;
       }
-      const { outer, pockets } = decomposeRing(ring, points);
-      const cleaned = cleanRing(outer);
-      if (cleaned === null) {
+      if (n.ring === null) {
         log(`分解後に退化した面を除外: id=${p.id}`);
         continue;
       }
-      if (outer.length !== ring.length) spurTrimmed += 1;
-      pocketCount += pockets.length;
+      if (n.outer.length !== n.rawRing.length) spurTrimmed += 1;
+      pocketCount += n.pocketCount;
       out.push({
         id: p.id,
         type: typeOf(i),
-        ring: cleaned,
-        rawRing: ring,
-        pockets: pockets.map((l) => cleanRing(l)).filter((l) => l !== null),
+        ring: n.ring,
+        rawRing: n.rawRing,
+        pockets: n.pockets,
         absArea: Math.abs(p.area),
       });
     }
@@ -1367,6 +1328,7 @@
     // 3. 包含解析 → 穴リング
     const parentOf = computeParents(activePolygons, points);
     log(`包含解析: ${parentOf.filter((v) => v !== -1).length} 面が他の面に内包 → 穴リング化`);
+    const holesOf = logic().assignContainedHoles(activePolygons, parentOf, points);
 
     const toLonLat = makeToLonLat(points, worldRect);
 
@@ -1714,32 +1676,13 @@
       }
       // この面を直接内包親とする面 = 穴。ただし既にポケット穴で覆われている領域
       // (島全体のポケット vs 島を分割した面など) は二重に開けない。
-      for (let j = 0; j < activePolygons.length; j += 1) {
-        if (parentOf[j] !== i) continue;
-        const jRing = activePolygons[j].ring;
-        let covered = false;
-        for (const loop of p.pockets) {
-          const loopSet = new Set(loop);
-          const samples = jRing.filter((v) => !loopSet.has(v)).slice(0, 9);
-          if (samples.length === 0) {
-            covered = true;
-            break;
-          }
-          let inCount = 0;
-          for (const v of samples) {
-            if (pointInRing(points[v].x, points[v].y, loop, points)) inCount += 1;
-          }
-          if (inCount * 2 > samples.length) {
-            covered = true;
-            break;
-          }
-        }
-        if (covered) continue;
+      // 判定は logic.js の assignContainedHoles（画面表示の穴も同じものを使う）。
+      for (const j of holesOf[i]) {
         holeNo += 1;
         rings.push({
           kind: "hole",
           id: `${fid}-h${holeNo}`,
-          vertexIds: ringVertexIds(jRing),
+          vertexIds: ringVertexIds(activePolygons[j].ring),
           parentRingId: territoryRingId,
         });
       }
